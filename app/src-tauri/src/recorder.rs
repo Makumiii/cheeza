@@ -33,6 +33,7 @@ pub struct Recorder {
     paused_at: Option<Instant>,
     media_break: bool,
     active: Arc<AtomicBool>,
+    write_silence: Arc<AtomicBool>,
     writer: SharedWriter,
     stream: cpal::Stream,
     pub events: Vec<PresentationEvent>,
@@ -101,6 +102,7 @@ pub fn start(project_path: &str, block_id: &str, device_name: Option<&str>) -> R
     )?;
     let writer = Arc::new(Mutex::new(Some(writer)));
     let active = Arc::new(AtomicBool::new(true));
+    let write_silence = Arc::new(AtomicBool::new(false));
     let channels = usize::from(config.channels);
     let stream = match sample_format {
         cpal::SampleFormat::F32 => build_stream(
@@ -108,6 +110,7 @@ pub fn start(project_path: &str, block_id: &str, device_name: Option<&str>) -> R
             &config,
             writer.clone(),
             active.clone(),
+            write_silence.clone(),
             channels,
             |value: f32| (value.clamp(-1.0, 1.0) * i16::MAX as f32) as i16,
         )?,
@@ -116,6 +119,7 @@ pub fn start(project_path: &str, block_id: &str, device_name: Option<&str>) -> R
             &config,
             writer.clone(),
             active.clone(),
+            write_silence.clone(),
             channels,
             |value: i16| value,
         )?,
@@ -124,6 +128,7 @@ pub fn start(project_path: &str, block_id: &str, device_name: Option<&str>) -> R
             &config,
             writer.clone(),
             active.clone(),
+            write_silence.clone(),
             channels,
             |value: u16| (value as i32 - 32_768) as i16,
         )?,
@@ -140,6 +145,7 @@ pub fn start(project_path: &str, block_id: &str, device_name: Option<&str>) -> R
         paused_at: None,
         media_break: false,
         active,
+        write_silence,
         writer,
         stream,
         events: Vec::new(),
@@ -151,6 +157,7 @@ fn build_stream<T, F>(
     config: &cpal::StreamConfig,
     writer: SharedWriter,
     active: Arc<AtomicBool>,
+    write_silence: Arc<AtomicBool>,
     channels: usize,
     convert: F,
 ) -> Result<cpal::Stream>
@@ -161,17 +168,21 @@ where
     Ok(device.build_input_stream(
         config,
         move |samples: &[T], _| {
-            if !active.load(Ordering::Relaxed) {
+            if !active.load(Ordering::Relaxed) && !write_silence.load(Ordering::Relaxed) {
                 return;
             }
             let mut guard = writer.lock();
             let Some(writer) = guard.as_mut() else { return };
             for frame in samples.chunks(channels) {
-                let mono = (frame
-                    .iter()
-                    .map(|sample| i64::from(convert(*sample)))
-                    .sum::<i64>()
-                    / frame.len() as i64) as i16;
+                let mono = if write_silence.load(Ordering::Relaxed) {
+                    0
+                } else {
+                    (frame
+                        .iter()
+                        .map(|sample| i64::from(convert(*sample)))
+                        .sum::<i64>()
+                        / frame.len() as i64) as i16
+                };
                 if let Err(error) = writer.write_sample(mono) {
                     log::error!("failed writing recording sample: {error}");
                     break;
@@ -204,12 +215,15 @@ impl Recorder {
         if self.paused_at.is_none() {
             self.paused_at = Some(Instant::now());
             self.active.store(false, Ordering::Relaxed);
+            self.write_silence.store(false, Ordering::Relaxed);
         }
     }
     pub fn resume(&mut self) {
         if let Some(paused_at) = self.paused_at.take() {
             self.paused_total += paused_at.elapsed();
             self.active.store(!self.media_break, Ordering::Relaxed);
+            self.write_silence
+                .store(self.media_break, Ordering::Relaxed);
         }
     }
     pub fn cue(&mut self, event_type: &str, tray_item_id: Option<String>) {
@@ -223,6 +237,7 @@ impl Recorder {
         if !self.media_break && self.paused_at.is_none() {
             self.media_break = true;
             self.active.store(false, Ordering::Relaxed);
+            self.write_silence.store(true, Ordering::Relaxed);
             self.cue("media_break_start", None);
         }
     }
@@ -231,6 +246,7 @@ impl Recorder {
             self.media_break = false;
             self.active
                 .store(self.paused_at.is_none(), Ordering::Relaxed);
+            self.write_silence.store(false, Ordering::Relaxed);
             self.cue("media_break_end", None);
         }
     }

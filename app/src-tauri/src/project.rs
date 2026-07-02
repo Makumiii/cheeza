@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 use crate::models::{
     CreateProjectInput, MediaAsset, ProjectSnapshot, ScriptBlock, TrayItem, UpdateBlockInput,
+    UpdateTrayItemInput,
 };
 
 const DB_NAME: &str = "cheeza.sqlite";
@@ -241,6 +242,30 @@ pub fn remove_tray_item(project_path: &str, tray_item_id: &str) -> Result<Projec
         "DELETE FROM tray_items WHERE id = ?1",
         params![tray_item_id],
     )?;
+    snapshot(&root, &connection)
+}
+
+pub fn update_tray_item(project_path: &str, item: UpdateTrayItemInput) -> Result<ProjectSnapshot> {
+    if !matches!(item.playback_mode.as_str(), "narrate_over" | "play_solo") {
+        bail!("Unsupported playback mode");
+    }
+    if item.in_point_us < 0 || item.out_point_us.is_some_and(|out| out <= item.in_point_us) {
+        bail!("Invalid media range");
+    }
+    let root = project_root(project_path)?;
+    let connection = connect(&root)?;
+    let changed = connection.execute(
+        "UPDATE tray_items SET playback_mode=?1,in_point_us=?2,out_point_us=?3 WHERE id=?4",
+        params![
+            item.playback_mode,
+            item.in_point_us,
+            item.out_point_us,
+            item.id
+        ],
+    )?;
+    if changed == 0 {
+        bail!("Tray item was not found");
+    }
     snapshot(&root, &connection)
 }
 

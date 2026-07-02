@@ -16,6 +16,15 @@ pub struct UpdateBlockInput {
     pub text: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateTrayItemInput {
+    pub id: String,
+    pub playback_mode: String,
+    pub in_point_us: i64,
+    pub out_point_us: Option<i64>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectSnapshot {

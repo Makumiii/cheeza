@@ -25,6 +25,7 @@ struct Cue {
     media_type: String,
     start_us: i64,
     in_point_us: i64,
+    playback_mode: String,
 }
 
 pub fn export(project_path: &str) -> Result<ExportResult> {
@@ -104,7 +105,7 @@ fn load_blocks(db: &Connection, root: &Path) -> Result<Vec<BlockRender>> {
     let mut blocks = Vec::new();
     for row in rows {
         let (audio, duration_us, take_id, text) = row?;
-        let mut cues_query = db.prepare("SELECT a.relative_path,a.media_type,e.project_time_us,ti.in_point_us FROM presentation_events e JOIN tray_items ti ON ti.id=e.tray_item_id JOIN media_assets a ON a.id=ti.asset_id WHERE e.take_id=?1 AND e.event_type='activate' ORDER BY e.project_time_us")?;
+        let mut cues_query = db.prepare("SELECT a.relative_path,a.media_type,e.project_time_us,ti.in_point_us,ti.playback_mode FROM presentation_events e JOIN tray_items ti ON ti.id=e.tray_item_id JOIN media_assets a ON a.id=ti.asset_id WHERE e.take_id=?1 AND e.event_type='activate' ORDER BY e.project_time_us")?;
         let cues = cues_query
             .query_map(params![take_id], |row| {
                 Ok(Cue {
@@ -112,6 +113,7 @@ fn load_blocks(db: &Connection, root: &Path) -> Result<Vec<BlockRender>> {
                     media_type: row.get(1)?,
                     start_us: row.get(2)?,
                     in_point_us: row.get(3)?,
+                    playback_mode: row.get(4)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -149,16 +151,63 @@ fn render_block(
         false,
     )?;
     let output = work.join(format!("block-{index}.mp4"));
-    run(Command::new("ffmpeg")
+    let solos = block
+        .cues
+        .iter()
+        .enumerate()
+        .filter(|(_, cue)| cue.playback_mode == "play_solo" && cue.media_type == "video")
+        .collect::<Vec<_>>();
+    let mut command = Command::new("ffmpeg");
+    command
         .args(["-y", "-i"])
         .arg(&visual)
         .arg("-i")
-        .arg(&block.audio)
-        .args([
+        .arg(&block.audio);
+    for (_, cue) in &solos {
+        command
+            .args([
+                "-ss",
+                &format!("{:.6}", cue.in_point_us as f64 / 1_000_000.0),
+                "-i",
+            ])
+            .arg(&cue.path);
+    }
+    if solos.is_empty() {
+        command.args(["-map", "0:v:0", "-map", "1:a:0"]);
+    } else {
+        let mut filters = vec!["[1:a]aresample=48000[narr]".to_owned()];
+        let mut labels = vec!["[narr]".to_owned()];
+        for (solo_index, (cue_index, cue)) in solos.iter().enumerate() {
+            let end = block
+                .cues
+                .get(cue_index + 1)
+                .map_or(block.duration_us, |next| next.start_us);
+            filters.push(format!(
+                "[{}:a]atrim=0:{:.6},asetpts=PTS-STARTPTS,adelay={}|{}[solo{}]",
+                solo_index + 2,
+                (end - cue.start_us) as f64 / 1_000_000.0,
+                cue.start_us / 1_000,
+                cue.start_us / 1_000,
+                solo_index
+            ));
+            labels.push(format!("[solo{solo_index}]"));
+        }
+        filters.push(format!(
+            "{}amix=inputs={}:normalize=0:dropout_transition=0[aout]",
+            labels.join(""),
+            labels.len()
+        ));
+        command.args([
+            "-filter_complex",
+            &filters.join(";"),
             "-map",
             "0:v:0",
             "-map",
-            "1:a:0",
+            "[aout]",
+        ]);
+    }
+    command
+        .args([
             "-c:v",
             "copy",
             "-c:a",
@@ -171,7 +220,8 @@ fn render_block(
             "-movflags",
             "+faststart",
         ])
-        .arg(&output))?;
+        .arg(&output);
+    run(&mut command)?;
     Ok(output)
 }
 

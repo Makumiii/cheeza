@@ -5,7 +5,7 @@ mod project;
 mod recorder;
 mod render;
 
-use models::{CreateProjectInput, ProjectSnapshot, UpdateBlockInput};
+use models::{CreateProjectInput, ProjectSnapshot, UpdateBlockInput, UpdateTrayItemInput};
 use recorder::{RecordingState, RecordingStatus};
 
 #[tauri::command]
@@ -42,6 +42,13 @@ fn add_tray_item(
 #[tauri::command]
 fn remove_tray_item(project_path: String, tray_item_id: String) -> Result<ProjectSnapshot, String> {
     project::remove_tray_item(&project_path, &tray_item_id).map_err(|error| error.to_string())
+}
+#[tauri::command]
+fn update_tray_item(
+    project_path: String,
+    item: UpdateTrayItemInput,
+) -> Result<ProjectSnapshot, String> {
+    project::update_tray_item(&project_path, item).map_err(|error| error.to_string())
 }
 #[tauri::command]
 fn list_input_devices() -> Result<Vec<String>, String> {
@@ -148,6 +155,7 @@ pub fn run() {
             import_media,
             add_tray_item,
             remove_tray_item,
+            update_tray_item,
             list_input_devices,
             start_recording,
             pause_recording,

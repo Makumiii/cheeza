@@ -306,6 +306,10 @@ function RecordingStudio({
         eventType: "activate",
         trayItemId: block.tray[0].id,
       });
+      if (block.tray[0].playbackMode === "play_solo") {
+        await invoke("start_media_break");
+        setMediaBreak(true);
+      }
       setElapsed(0);
       setStartedAt(performance.now());
       setPhase("recording");
@@ -323,6 +327,9 @@ function RecordingStudio({
         eventType: "activate",
         trayItemId: block.tray[index].id,
       });
+      const solo = block.tray[index].playbackMode === "play_solo";
+      if (solo && !mediaBreak) { await invoke("start_media_break"); setMediaBreak(true); }
+      if (!solo && mediaBreak) { await invoke("end_media_break"); setMediaBreak(false); }
       setCueIndex(index);
     } catch (reason) {
       setError(String(reason));
@@ -392,7 +399,7 @@ function RecordingStudio({
           className={`live-canvas ${project.aspectRatio === "9:16" ? "vertical" : ""}`}
         >
           {activeCue && (
-            <AssetPreview project={project} assetId={activeCue.assetId} playing={phase === "recording"} />
+            <AssetPreview project={project} assetId={activeCue.assetId} playing={phase === "recording"} withAudio={activeCue.playbackMode === "play_solo"} />
           )}
           {phase === "countdown" && (
             <div className="countdown">{countdown}</div>
@@ -866,6 +873,10 @@ function Tray({
           <div className="tray-card" key={item.id}>
             <span className="cue-number">{index + 1}</span>
             <AssetPreview project={project} assetId={item.assetId} />
+            <select className="playback-select" value={item.playbackMode} onChange={(event) => mutate("update_tray_item", { item: { id: item.id, playbackMode: event.target.value, inPointUs: item.inPointUs, outPointUs: item.outPointUs } })}>
+              <option value="narrate_over">Voice over</option>
+              <option value="play_solo">Play solo</option>
+            </select>
             <button
               onClick={() =>
                 mutate("remove_tray_item", { trayItemId: item.id })
@@ -901,15 +912,17 @@ function AssetPreview({
   project,
   assetId,
   playing = false,
+  withAudio = false,
 }: {
   project: ProjectSnapshot;
   assetId: string;
   playing?: boolean;
+  withAudio?: boolean;
 }) {
   const asset = project.assets.find((item) => item.id === assetId);
   if (!asset) return null;
   const source = convertFileSrc(`${project.path}/${asset.relativePath}`);
-  if (asset.mediaType === "video") return <video key={`${assetId}-${playing}`} src={source} muted autoPlay={playing} />;
+  if (asset.mediaType === "video") return <video key={`${assetId}-${playing}`} src={source} muted={!withAudio} autoPlay={playing} />;
   if (asset.mediaType === "audio")
     return (
       <div className="audio-preview">

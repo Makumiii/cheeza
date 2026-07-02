@@ -719,6 +719,7 @@ button {
 .tray-card:hover button {
   display: grid;
 }
+.playback-select { position: absolute; z-index: 3; left: 4px; right: 4px; bottom: 4px; width: calc(100% - 8px); border: 1px solid rgba(255,255,255,.15); border-radius: 4px; padding: 2px 3px; color: #d8d1c8; background: rgba(13,11,9,.88); font-size: 8px; }
 .tray-add {
   width: 92px;
   flex: none;
