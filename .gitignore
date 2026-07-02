@@ -1,0 +1,22 @@
+# Dependencies and generated output
+node_modules/
+dist/
+target/
+.vite/
+
+# Local tooling and secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Cheeza projects and media are never repository content
+*.cheeza/
+cheeza.sqlite

@@ -1,0 +1,4 @@
+import { create } from 'zustand'
+import type { ProjectSnapshot } from '../types'
+interface ProjectState { project: ProjectSnapshot | null; activeBlockId: string | null; busy: boolean; error: string | null; setProject: (project: ProjectSnapshot) => void; setActiveBlock: (id: string) => void; setBusy: (busy: boolean) => void; setError: (error: string | null) => void; reset: () => void }
+export const useProjectStore = create<ProjectState>((set) => ({ project: null, activeBlockId: null, busy: false, error: null, setProject: (project) => set((state) => ({ project, activeBlockId: state.activeBlockId ?? project.blocks[0]?.id ?? null })), setActiveBlock: (activeBlockId) => set({ activeBlockId }), setBusy: (busy) => set({ busy }), setError: (error) => set({ error }), reset: () => set({ project: null, activeBlockId: null, error: null }) }))

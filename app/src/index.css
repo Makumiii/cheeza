@@ -1,0 +1,4 @@
+@import url('https://api.fontshare.com/v2/css?f[]=satoshi@400,500,600,700&display=swap');
+:root { font-family: Satoshi, "Segoe UI", sans-serif; color: #f4f1ed; background: #0c0b0a; font-synthesis: none; text-rendering: optimizeLegibility; --orange: #ff7a1a; --orange-bright: #ff9838; --panel: #12110f; --line: rgba(255,255,255,.085); --muted: #918b82; --ease-out: cubic-bezier(.23,1,.32,1); }
+* { box-sizing: border-box; } html, body, #root { width: 100%; min-width: 1100px; height: 100%; margin: 0; overflow: hidden; } button, input, textarea, select { font: inherit; } button { color: inherit; } button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 2px solid var(--orange); outline-offset: 2px; } button:active:not(:disabled) { transform: scale(.97); }
+@media (prefers-reduced-motion: reduce) { *,*::before,*::after { animation-duration:.01ms!important; transition-duration:.01ms!important; } }
