@@ -51,9 +51,49 @@ CREATE TABLE IF NOT EXISTS tray_items (
   in_point_us INTEGER NOT NULL DEFAULT 0,
   out_point_us INTEGER
 );
+CREATE TABLE IF NOT EXISTS takes (
+  id TEXT PRIMARY KEY,
+  block_id TEXT NOT NULL REFERENCES script_blocks(id) ON DELETE CASCADE,
+  relative_path TEXT NOT NULL UNIQUE,
+  duration_us INTEGER NOT NULL,
+  selected INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS presentation_events (
+  id TEXT PRIMARY KEY,
+  take_id TEXT NOT NULL REFERENCES takes(id) ON DELETE CASCADE,
+  event_type TEXT NOT NULL,
+  project_time_us INTEGER NOT NULL,
+  tray_item_id TEXT REFERENCES tray_items(id) ON DELETE SET NULL
+);
 CREATE INDEX IF NOT EXISTS idx_blocks_position ON script_blocks(position);
 CREATE INDEX IF NOT EXISTS idx_tray_block_position ON tray_items(block_id, position);
 "#;
+
+pub fn save_recording(recording: crate::recorder::FinishedRecording) -> Result<ProjectSnapshot> {
+    let mut connection = connect(&recording.project_path)?;
+    let transaction = connection.transaction()?;
+    transaction.execute(
+        "UPDATE takes SET selected = 0 WHERE block_id = ?1",
+        params![recording.block_id],
+    )?;
+    transaction.execute(
+        "INSERT INTO takes (id, block_id, relative_path, duration_us, selected, created_at) VALUES (?1, ?2, ?3, ?4, 1, ?5)",
+        params![recording.take_id, recording.block_id, recording.relative_path, recording.duration_us, Utc::now().to_rfc3339()],
+    )?;
+    for event in recording.events {
+        transaction.execute(
+            "INSERT INTO presentation_events (id, take_id, event_type, project_time_us, tray_item_id) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![Uuid::new_v4().to_string(), recording.take_id, event.event_type, event.project_time_us, event.tray_item_id],
+        )?;
+    }
+    transaction.execute(
+        "UPDATE script_blocks SET status = 'recorded', alignment_stale = 1 WHERE id = ?1",
+        params![recording.block_id],
+    )?;
+    transaction.commit()?;
+    snapshot(&recording.project_path, &connection)
+}
 
 pub fn create(input: CreateProjectInput) -> Result<ProjectSnapshot> {
     let name = input.name.trim();
