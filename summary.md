@@ -5,6 +5,7 @@ Repository: `git@github.com:Makumiii/cheeza.git`
 Branch: `main`  
 Latest implementation commit: `c620057`
 Release preparation base: `a8a0d86`
+Final packaged release commit: `4302a62`
 Current release tag: `v0.1.2`
 
 ## Product
@@ -88,12 +89,13 @@ Remote validation:
 - `v0.1.0` Windows release for `c620057`: run `28584671576`.
 - `v0.1.1` Windows release for `a8a0d86`: run `28584791777`.
 - Final public `v0.1.2` Windows release includes the packaged-dialog capability correction. Run `28585673211` succeeded and published `Cheeza_0.1.2_x64-setup.exe` (580,805,829 bytes).
+- Installed-release smoke run `28586903971`: success. It downloaded the public installer, installed it silently on `windows-latest`, found the installed executable, verified bundled FFmpeg/FFprobe/speech worker/model, health-checked the worker, launched the GUI for eight seconds, and confirmed it remained alive.
 
-## Immediate remaining release work
+## Optional physical-Windows exploratory QA
 
-1. Confirm `.github/workflows/windows-smoke.yml` succeeds. It installs the public `v0.1.2` NSIS package, validates bundled tools/model, health-checks the speech worker, and launch-smokes the installed GUI.
-2. The public installer size is 580,805,829 bytes. A complete local checksum download was abandoned because the sandbox transfer was throttled; GitHub Actions artifact/release upload integrity and the installed-release smoke test are the authoritative gates.
-3. On an actual Windows machine, install the final NSIS artifact and manually test:
+The automated release gates are complete. When physical Windows hardware and a microphone are available, perform this additional exploratory pass:
+
+1. Install the final NSIS artifact and manually test:
    - create/open project;
    - `.txt` import;
    - microphone enumeration and one real recording;
@@ -102,7 +104,7 @@ Remote validation:
    - automatic caption alignment without Python or FFmpeg installed system-wide;
    - 9:16 and 16:9 exports and SRT sidecars;
    - reopening the portable project.
-4. Confirm cross-platform CI for `a8a0d86`. Windows releases now run only for manual dispatch or `v*` tags.
+2. The public installer size is 580,805,829 bytes. A complete local checksum download was abandoned because the sandbox transfer was throttled; GitHub Actions artifact/release upload integrity and installed-release smoke run `28586903971` are the authoritative automated gates.
 
 ## Product gaps beyond the completed core workflow
 
