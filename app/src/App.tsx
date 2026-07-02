@@ -51,6 +51,7 @@ function App() {
   const store = useProjectStore();
   const { project, activeBlockId, busy, error } = store;
   const [mode, setMode] = useState<"prepare" | "record">("prepare");
+  const [notice, setNotice] = useState<string | null>(null);
   if (!project)
     return (
       <ProjectHome
@@ -64,6 +65,20 @@ function App() {
   const activeBlock =
     project.blocks.find((block) => block.id === activeBlockId) ??
     project.blocks[0];
+  const projectPath = project.path;
+  async function exportVideo() {
+    store.setBusy(true);
+    store.setError(null);
+    setNotice(null);
+    try {
+      const result = await invoke<{ path: string }>("export_project", { projectPath });
+      setNotice(`Export ready: ${result.path}`);
+    } catch (reason) {
+      store.setError(String(reason));
+    } finally {
+      store.setBusy(false);
+    }
+  }
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -88,7 +103,7 @@ function App() {
         <button className="icon-button" aria-label="Project settings">
           <Settings2 size={18} />
         </button>
-        <button className="export-button">
+        <button className="export-button" onClick={exportVideo} disabled={busy}>
           <Play size={15} fill="currentColor" /> Preview
         </button>
       </header>
@@ -207,6 +222,7 @@ function App() {
       {error && (
         <ErrorToast error={error} dismiss={() => store.setError(null)} />
       )}
+      {notice && <div className="success-toast"><span>{notice}</span><button onClick={() => setNotice(null)}>Dismiss</button></div>}
     </main>
   );
 }

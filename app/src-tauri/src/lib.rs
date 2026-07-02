@@ -1,6 +1,7 @@
 mod models;
 mod project;
 mod recorder;
+mod render;
 
 use models::{CreateProjectInput, ProjectSnapshot, UpdateBlockInput};
 use recorder::{RecordingState, RecordingStatus};
@@ -100,6 +101,11 @@ fn stop_recording(state: tauri::State<'_, RecordingState>) -> Result<ProjectSnap
         .map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+fn export_project(project_path: String) -> Result<render::ExportResult, String> {
+    render::export(&project_path).map_err(|error| error.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -129,7 +135,8 @@ pub fn run() {
             pause_recording,
             resume_recording,
             record_cue,
-            stop_recording
+            stop_recording,
+            export_project
         ])
         .run(tauri::generate_context!())
         .expect("error while running Cheeza");

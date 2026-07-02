@@ -899,6 +899,8 @@ button {
   font-size: 10px;
   font-weight: 700;
 }
+.success-toast { position: fixed; right: 18px; bottom: 18px; z-index: 100; max-width: 560px; display: flex; align-items: center; gap: 18px; padding: 12px 14px; border-radius: 9px; background: #142018; border: 1px solid #315b3c; box-shadow: 0 15px 50px #000; color: #bfe0c6; font-size: 11px; }
+.success-toast button { background: transparent; color: #75bb83; font-size: 10px; font-weight: 700; }
 @keyframes busy {
   from {
     transform: translateX(-110%);
