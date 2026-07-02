@@ -79,6 +79,12 @@ function App() {
       store.setBusy(false);
     }
   }
+  async function alignActiveBlock() {
+    if (!activeBlock) return;
+    store.setBusy(true); store.setError(null); setNotice(null);
+    try { await invoke("align_block", { projectPath, blockId: activeBlock.id }); store.setProject(await invoke<ProjectSnapshot>("open_project", { projectPath })); setNotice("Captions aligned to the accepted narration take."); }
+    catch (reason) { store.setError(String(reason)); } finally { store.setBusy(false); }
+  }
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -190,7 +196,7 @@ function App() {
                   setError={store.setError}
                 />
               )}
-              <div className="record-ready">
+        <div className="record-ready">
                 <div className="record-copy">
                   <span className="record-icon">
                     <Mic2 size={18} />
@@ -475,8 +481,9 @@ function RecordingStudio({
         >
           <SkipForward size={18} />
           <span>Next</span>
-        </button>
-      </div>
+          </button>
+          {activeBlock?.status === "recorded" && <button className="align-button" onClick={alignActiveBlock} disabled={busy}><Sparkles size={15} /> {activeBlock.alignmentStale ? "Align captions" : "Captions aligned"}</button>}
+        </div>
       <div className="record-shortcuts">
         <span>
           <kbd>Space</kbd> Pause

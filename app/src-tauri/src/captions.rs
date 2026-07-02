@@ -5,6 +5,43 @@ pub struct CaptionBlock<'a> {
     pub offset_us: i64,
     pub duration_us: i64,
 }
+#[derive(Clone)]
+pub struct TimedWord {
+    pub word: String,
+    pub start_us: i64,
+    pub end_us: i64,
+}
+pub struct AlignedBlock {
+    pub offset_us: i64,
+    pub words: Vec<TimedWord>,
+}
+
+pub fn write_aligned_srt(path: &Path, blocks: &[AlignedBlock]) -> Result<()> {
+    let mut index = 1;
+    let mut output = String::new();
+    for block in blocks {
+        for words in block.words.chunks(6) {
+            if words.is_empty() {
+                continue;
+            }
+            let start = block.offset_us + words[0].start_us;
+            let end = block.offset_us + words.last().expect("non-empty chunk").end_us;
+            let phrase = words
+                .iter()
+                .map(|word| word.word.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            output.push_str(&format!(
+                "{index}\n{} --> {}\n{phrase}\n\n",
+                timestamp(start),
+                timestamp(end)
+            ));
+            index += 1;
+        }
+    }
+    fs::write(path, output)?;
+    Ok(())
+}
 pub fn write_srt(path: &Path, blocks: &[CaptionBlock<'_>]) -> Result<()> {
     let mut index = 1;
     let mut output = String::new();

@@ -4,6 +4,7 @@ mod models;
 mod project;
 mod recorder;
 mod render;
+mod speech;
 
 use models::{CreateProjectInput, ProjectSnapshot, UpdateBlockInput, UpdateTrayItemInput};
 use recorder::{RecordingState, RecordingStatus};
@@ -131,6 +132,11 @@ fn export_project(project_path: String) -> Result<render::ExportResult, String> 
     render::export(&project_path).map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+fn align_block(project_path: String, block_id: String) -> Result<Vec<speech::AlignedWord>, String> {
+    speech::align_block(&project_path, &block_id).map_err(|error| error.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -164,7 +170,8 @@ pub fn run() {
             start_media_break,
             end_media_break,
             stop_recording,
-            export_project
+            export_project,
+            align_block
         ])
         .run(tauri::generate_context!())
         .expect("error while running Cheeza");

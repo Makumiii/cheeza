@@ -68,6 +68,19 @@ CREATE TABLE IF NOT EXISTS presentation_events (
   project_time_us INTEGER NOT NULL,
   tray_item_id TEXT REFERENCES tray_items(id) ON DELETE SET NULL
 );
+CREATE TABLE IF NOT EXISTS aligned_words (
+  take_id TEXT NOT NULL REFERENCES takes(id) ON DELETE CASCADE,
+  position INTEGER NOT NULL,
+  word TEXT NOT NULL,
+  start_us INTEGER NOT NULL,
+  end_us INTEGER NOT NULL,
+  matched INTEGER NOT NULL,
+  PRIMARY KEY(take_id, position)
+);
+CREATE TABLE IF NOT EXISTS transcripts (
+  take_id TEXT PRIMARY KEY REFERENCES takes(id) ON DELETE CASCADE,
+  text TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_blocks_position ON script_blocks(position);
 CREATE INDEX IF NOT EXISTS idx_tray_block_position ON tray_items(block_id, position);
 "#;

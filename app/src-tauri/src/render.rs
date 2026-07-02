@@ -19,6 +19,7 @@ struct BlockRender {
     audio: PathBuf,
     duration_us: i64,
     cues: Vec<Cue>,
+    words: Vec<crate::captions::TimedWord>,
 }
 struct Cue {
     path: PathBuf,
@@ -75,6 +76,21 @@ pub fn export(project_path: &str) -> Result<ExportResult> {
         })
         .collect::<Vec<_>>();
     crate::captions::write_srt(&caption_path, &captions)?;
+    if blocks.iter().all(|block| !block.words.is_empty()) {
+        let mut aligned_offset = 0;
+        let aligned = blocks
+            .iter()
+            .map(|block| {
+                let item = crate::captions::AlignedBlock {
+                    offset_us: aligned_offset,
+                    words: block.words.clone(),
+                };
+                aligned_offset += block.duration_us;
+                item
+            })
+            .collect::<Vec<_>>();
+        crate::captions::write_aligned_srt(&caption_path, &aligned)?;
+    }
     let output = root.join("exports").join(format!(
         "{}-{aspect}-{}.mp4",
         safe_name(&name),
@@ -117,11 +133,24 @@ fn load_blocks(db: &Connection, root: &Path) -> Result<Vec<BlockRender>> {
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut words_query = db.prepare(
+            "SELECT word,start_us,end_us FROM aligned_words WHERE take_id=?1 ORDER BY position",
+        )?;
+        let words = words_query
+            .query_map(params![take_id], |row| {
+                Ok(crate::captions::TimedWord {
+                    word: row.get(0)?,
+                    start_us: row.get(1)?,
+                    end_us: row.get(2)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         blocks.push(BlockRender {
             text,
             audio: root.join(audio),
             duration_us,
             cues,
+            words,
         });
     }
     Ok(blocks)

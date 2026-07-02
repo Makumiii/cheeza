@@ -782,6 +782,7 @@ button {
   border-radius: 50%;
   background: #e93434;
 }
+.align-button { display: inline-flex; align-items: center; gap: 7px; padding: 9px 12px; border-radius: 8px; color: #ffc18f; background: #312117; border: 1px solid #56331e; font-size: 10px; }
 .search-box {
   margin: 0 3px 12px;
   position: relative;

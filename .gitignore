@@ -3,6 +3,10 @@ node_modules/
 dist/
 target/
 .vite/
+.venv/
+.uv-cache/
+__pycache__/
+*.pyc
 
 # Local tooling and secrets
 .env
