@@ -337,9 +337,97 @@ fn safe_name(value: &str) -> String {
 }
 #[cfg(test)]
 mod tests {
-    use super::safe_name;
+    use super::{export, safe_name};
+    use crate::{models::CreateProjectInput, project};
+    use rusqlite::{params, Connection};
+    use std::process::Command;
     #[test]
     fn names_are_portable() {
         assert_eq!(safe_name("My Great Video!"), "my-great-video");
+    }
+
+    #[test]
+    #[ignore = "requires FFmpeg and performs a full 1080p encode"]
+    fn renders_fixture_project_end_to_end() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.png");
+        assert!(Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=0xEE6C1A:s=640x360",
+                "-frames:v",
+                "1"
+            ])
+            .arg(&source)
+            .output()
+            .unwrap()
+            .status
+            .success());
+        let snapshot = project::create(CreateProjectInput {
+            parent_path: temp.path().to_string_lossy().into_owned(),
+            name: "Fixture".into(),
+            aspect_ratio: "9:16".into(),
+            platform_target: "TikTok".into(),
+        })
+        .unwrap();
+        let snapshot = project::save_script(
+            &snapshot.path,
+            "Every great story begins with a clear point of view.",
+        )
+        .unwrap();
+        let snapshot =
+            project::import_media(&snapshot.path, &[source.to_string_lossy().into_owned()])
+                .unwrap();
+        let snapshot = project::add_tray_item(
+            &snapshot.path,
+            &snapshot.blocks[0].id,
+            &snapshot.assets[0].id,
+        )
+        .unwrap();
+        let root = std::path::PathBuf::from(&snapshot.path);
+        let audio = root.join("recordings/processed/fixture.wav");
+        assert!(Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=220:duration=2",
+                "-ar",
+                "48000",
+                "-ac",
+                "1"
+            ])
+            .arg(&audio)
+            .output()
+            .unwrap()
+            .status
+            .success());
+        let db = Connection::open(root.join("cheeza.sqlite")).unwrap();
+        db.execute("INSERT INTO takes(id,block_id,relative_path,processed_relative_path,duration_us,selected,created_at) VALUES('take',?1,'recordings/processed/fixture.wav','recordings/processed/fixture.wav',2000000,1,'now')", params![snapshot.blocks[0].id]).unwrap();
+        db.execute("INSERT INTO presentation_events(id,take_id,event_type,project_time_us,tray_item_id) VALUES('event','take','activate',0,?1)", params![snapshot.blocks[0].tray[0].id]).unwrap();
+        let result = export(&snapshot.path).unwrap();
+        let probe = Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-show_entries",
+                "stream=codec_name,width,height",
+                "-of",
+                "compact",
+            ])
+            .arg(&result.path)
+            .output()
+            .unwrap();
+        let report = String::from_utf8_lossy(&probe.stdout);
+        assert!(probe.status.success());
+        assert!(
+            report.contains("codec_name=h264")
+                && report.contains("width=1080")
+                && report.contains("height=1920")
+        );
     }
 }

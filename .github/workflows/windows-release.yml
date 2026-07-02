@@ -36,8 +36,9 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force app/src-tauri/resources/bin | Out-Null
           New-Item -ItemType Directory -Force app/src-tauri/resources/models/small.en | Out-Null
-          pyinstaller --onefile --name speech-worker --distpath app/src-tauri/resources/bin workers/speech_worker.py
-          huggingface-cli download Systran/faster-whisper-small.en --local-dir app/src-tauri/resources/models/small.en
+          pyinstaller --noconfirm --clean --onefile --name speech-worker --distpath app/src-tauri/resources/bin --collect-all faster_whisper --collect-all ctranslate2 --collect-all av --collect-all tokenizers workers/speech_worker.py
+          hf download Systran/faster-whisper-small.en --local-dir app/src-tauri/resources/models/small.en
+          app/src-tauri/resources/bin/speech-worker.exe --health
       - name: Bundle FFmpeg and FFprobe
         run: |
           Invoke-WebRequest https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip -OutFile $env:RUNNER_TEMP/ffmpeg.zip
