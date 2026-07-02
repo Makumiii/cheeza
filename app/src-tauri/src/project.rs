@@ -91,10 +91,16 @@ CREATE INDEX IF NOT EXISTS idx_tray_block_position ON tray_items(block_id, posit
 
 pub fn save_recording(recording: crate::recorder::FinishedRecording) -> Result<ProjectSnapshot> {
     let processed_relative_path = format!("recordings/processed/{}.wav", recording.take_id);
-    crate::audio::enhance_dialogue(
+    if let Err(error) = crate::audio::enhance_dialogue(
         &recording.project_path.join(&recording.relative_path),
         &recording.project_path.join(&processed_relative_path),
-    )?;
+    ) {
+        log::warn!("dialogue enhancement failed; preserving clean raw take: {error}");
+        fs::copy(
+            recording.project_path.join(&recording.relative_path),
+            recording.project_path.join(&processed_relative_path),
+        )?;
+    }
     let mut connection = connect(&recording.project_path)?;
     let transaction = connection.transaction()?;
     transaction.execute(
@@ -279,6 +285,16 @@ pub fn add_tray_item(
 ) -> Result<ProjectSnapshot> {
     let root = project_root(project_path)?;
     let connection = connect(&root)?;
+    let media_type: String = connection
+        .query_row(
+            "SELECT media_type FROM media_assets WHERE id=?1",
+            params![asset_id],
+            |row| row.get(0),
+        )
+        .context("Media asset was not found")?;
+    if media_type == "audio" {
+        bail!("Audio files cannot be used as visual cues");
+    }
     let position: i64 = connection.query_row(
         "SELECT COALESCE(MAX(position), -1) + 1 FROM tray_items WHERE block_id = ?1",
         params![block_id],
@@ -417,6 +433,19 @@ pub fn update_tray_item(project_path: &str, item: UpdateTrayItemInput) -> Result
     }
     let root = project_root(project_path)?;
     let connection = connect(&root)?;
+    let duration_us: Option<i64> = connection
+        .query_row(
+            "SELECT a.duration_us FROM tray_items t JOIN media_assets a ON a.id=t.asset_id WHERE t.id=?1",
+            params![item.id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    if duration_us.is_some_and(|duration| {
+        item.in_point_us >= duration || item.out_point_us.is_some_and(|out| out > duration)
+    }) {
+        bail!("Trim range exceeds the source duration");
+    }
     let changed = connection.execute(
         "UPDATE tray_items SET playback_mode=?1,in_point_us=?2,out_point_us=?3 WHERE id=?4",
         params![

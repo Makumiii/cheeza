@@ -102,7 +102,12 @@ pub fn export(project_path: &str) -> Result<ExportResult> {
         .replace('\\', "\\\\")
         .replace(':', "\\:")
         .replace('\'', "\\'");
-    run(crate::tools::command("ffmpeg").args(["-y", "-i"]).arg(&assembled).args(["-vf", &format!("subtitles='{subtitle}':force_style='FontName=Arial,FontSize=18,PrimaryColour=&H00FFFFFF,OutlineColour=&H00101010,Outline=3,Shadow=0,Alignment=2,MarginV=110'"), "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-c:a", "copy", "-movflags", "+faststart"]).arg(&output))?;
+    let (caption_size, caption_margin) = if aspect == "9:16" {
+        (34, 260)
+    } else {
+        (28, 70)
+    };
+    run(crate::tools::command("ffmpeg").args(["-y", "-i"]).arg(&assembled).args(["-vf", &format!("subtitles='{subtitle}':force_style='FontName=Arial,FontSize={caption_size},PrimaryColour=&H00FFFFFF,OutlineColour=&H00101010,Outline=3,Shadow=0,Alignment=2,MarginV={caption_margin}'"), "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-c:a", "copy", "-movflags", "+faststart"]).arg(&output))?;
     Ok(ExportResult {
         path: output.to_string_lossy().into_owned(),
         duration_us: blocks.iter().map(|block| block.duration_us).sum(),
@@ -204,7 +209,15 @@ fn render_block(
             .arg(&cue.path);
     }
     if solos.is_empty() {
-        command.args(["-map", "0:v:0", "-map", "1:a:0"]);
+        let fade_out = (block.duration_us as f64 / 1_000_000.0 - 0.03).max(0.0);
+        command.args([
+            "-filter_complex",
+            &format!("[1:a]afade=t=in:st=0:d=0.03,afade=t=out:st={fade_out:.6}:d=0.03[aout]"),
+            "-map",
+            "0:v:0",
+            "-map",
+            "[aout]",
+        ]);
     } else {
         let mut filters = vec!["[1:a]aresample=48000[narr]".to_owned()];
         let mut labels = vec!["[narr]".to_owned()];
@@ -229,9 +242,13 @@ fn render_block(
             labels.push(format!("[solo{solo_index}]"));
         }
         filters.push(format!(
-            "{}amix=inputs={}:normalize=0:dropout_transition=0[aout]",
+            "{}amix=inputs={}:normalize=0:dropout_transition=0[mixed]",
             labels.join(""),
             labels.len()
+        ));
+        let fade_out = (block.duration_us as f64 / 1_000_000.0 - 0.03).max(0.0);
+        filters.push(format!(
+            "[mixed]afade=t=in:st=0:d=0.03,afade=t=out:st={fade_out:.6}:d=0.03[aout]"
         ));
         command.args([
             "-filter_complex",
@@ -442,8 +459,11 @@ mod tests {
         assert!(probe.status.success());
         assert!(
             report.contains("codec_name=h264")
+                && report.contains("codec_name=aac")
                 && report.contains("width=1080")
                 && report.contains("height=1920")
         );
+        let captions = std::fs::read_to_string(root.join("captions/captions.srt")).unwrap();
+        assert!(captions.contains("Every great story begins"));
     }
 }

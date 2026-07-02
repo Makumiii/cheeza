@@ -118,6 +118,7 @@ function App() {
           className="icon-button"
           onClick={store.reset}
           aria-label="Back to projects"
+          disabled={mode === "record"}
         >
           <ArrowLeft size={18} />
         </button>
@@ -130,7 +131,7 @@ function App() {
         </div>
         <div className="topbar-spacer" />
         <span className="save-state">
-          <span /> Saved locally
+          <span /> Local project
         </span>
         <button className="export-button" onClick={exportVideo} disabled={busy}>
           <Play size={15} fill="currentColor" /> Export video
@@ -504,6 +505,8 @@ function RecordingStudio({
               assetId={activeCue.assetId}
               playing={phase === "recording"}
               withAudio={activeCue.playbackMode === "play_solo"}
+              inPointUs={activeCue.inPointUs}
+              outPointUs={activeCue.outPointUs}
             />
           )}
           {phase === "countdown" && (
@@ -849,6 +852,9 @@ function ErrorToast({
 function ScriptImporter({ project, onUpdate, setBusy, setError }: AsyncProps) {
   const [editing, setEditing] = useState(!project.blocks.length);
   const [script, setScript] = useState(project.script);
+  useEffect(() => {
+    if (!editing) setScript(project.script);
+  }, [editing, project.script]);
   async function save() {
     if (!script.trim()) return;
     setBusy(true);
@@ -948,7 +954,7 @@ function MediaDock({ project, onUpdate, setBusy, setError }: AsyncProps) {
       </label>
       <div className="media-grid">
         {filtered.map((asset) => (
-          <div className="asset-card" key={asset.id} draggable>
+          <div className="asset-card" key={asset.id}>
             <AssetPreview project={project} assetId={asset.id} />
             <span title={asset.name}>{asset.name}</span>
             <small>{asset.mediaType}</small>
@@ -1050,7 +1056,7 @@ function Tray({
             }
           >
             <option value="">Add cue</option>
-            {project.assets.map((asset) => (
+            {project.assets.filter((asset) => asset.mediaType !== "audio").map((asset) => (
               <option key={asset.id} value={asset.id}>
                 {asset.name}
               </option>
@@ -1096,11 +1102,15 @@ function AssetPreview({
   assetId,
   playing = false,
   withAudio = false,
+  inPointUs = 0,
+  outPointUs = null,
 }: {
   project: ProjectSnapshot;
   assetId: string;
   playing?: boolean;
   withAudio?: boolean;
+  inPointUs?: number;
+  outPointUs?: number | null;
 }) {
   const asset = project.assets.find((item) => item.id === assetId);
   if (!asset) return null;
@@ -1112,10 +1122,14 @@ function AssetPreview({
   if (asset.mediaType === "video")
     return (
       <video
-        key={`${assetId}-${playing}`}
+        key={`${assetId}-${playing}-${inPointUs}-${outPointUs}`}
         src={source}
         muted={!withAudio}
         autoPlay={playing}
+        onLoadedMetadata={(event) => { event.currentTarget.currentTime = inPointUs / 1_000_000; }}
+        onTimeUpdate={(event) => {
+          if (outPointUs != null && event.currentTarget.currentTime >= outPointUs / 1_000_000) event.currentTarget.pause();
+        }}
       />
     );
   if (asset.mediaType === "audio")
