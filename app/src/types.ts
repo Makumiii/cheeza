@@ -7,6 +7,16 @@ export interface ProjectSnapshot {
   script: string;
   blocks: ScriptBlock[];
   assets: MediaAsset[];
+  settings: ProjectSettings;
+}
+export interface ProjectSettings {
+  backgroundMusicAssetId: string | null;
+  musicVolume: number;
+  musicDucking: boolean;
+  openingCard: boolean;
+  openingTitle: string;
+  captionStyle: "clean" | "bold" | "minimal";
+  transitionStyle: "cut" | "dissolve";
 }
 export interface ScriptBlock {
   id: string;
@@ -24,6 +34,9 @@ export interface Take {
   durationUs: number;
   selected: boolean;
   createdAt: string;
+  alignmentTotal: number;
+  alignmentMatched: number;
+  transcript: string | null;
 }
 export interface MediaAsset {
   id: string;
@@ -44,4 +57,5 @@ export interface TrayItem {
   playbackMode: "narrate_over" | "play_solo";
   inPointUs: number;
   outPointUs: number | null;
+  loopMode: "freeze" | "repeat";
 }

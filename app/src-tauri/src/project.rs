@@ -11,8 +11,8 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::models::{
-    CreateProjectInput, MediaAsset, ProjectSnapshot, ScriptBlock, Take, TrayItem, UpdateBlockInput,
-    UpdateTrayItemInput,
+    CreateProjectInput, MediaAsset, ProjectSettings, ProjectSnapshot, ScriptBlock, Take, TrayItem,
+    UpdateBlockInput, UpdateProjectSettingsInput, UpdateTrayItemInput,
 };
 
 const DB_NAME: &str = "cheeza.sqlite";
@@ -55,7 +55,8 @@ CREATE TABLE IF NOT EXISTS tray_items (
   position INTEGER NOT NULL,
   playback_mode TEXT NOT NULL DEFAULT 'narrate_over',
   in_point_us INTEGER NOT NULL DEFAULT 0,
-  out_point_us INTEGER
+  out_point_us INTEGER,
+  loop_mode TEXT NOT NULL DEFAULT 'freeze'
 );
 CREATE TABLE IF NOT EXISTS takes (
   id TEXT PRIMARY KEY,
@@ -122,6 +123,7 @@ pub fn save_recording(recording: crate::recorder::FinishedRecording) -> Result<P
         params![recording.block_id],
     )?;
     transaction.commit()?;
+    let _ = fs::remove_file(recording.project_path.join("cache/active-recording.json"));
     snapshot(&recording.project_path, &connection)
 }
 
@@ -165,8 +167,87 @@ pub fn create(input: CreateProjectInput) -> Result<ProjectSnapshot> {
 
 pub fn open(project_path: &str) -> Result<ProjectSnapshot> {
     let root = project_root(project_path)?;
-    let connection = connect(&root)?;
+    let mut connection = connect(&root)?;
+    recover_interrupted(&root, &mut connection)?;
     snapshot(&root, &connection)
+}
+
+fn recover_interrupted(root: &Path, connection: &mut Connection) -> Result<()> {
+    let metadata_path = root.join("cache/active-recording.json");
+    if !metadata_path.is_file() {
+        return Ok(());
+    }
+    let metadata: crate::recorder::RecoveryMetadata =
+        serde_json::from_slice(&fs::read(&metadata_path)?)?;
+    let already_saved: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM takes WHERE id=?1",
+        params![metadata.take_id],
+        |row| row.get(0),
+    )?;
+    if already_saved > 0 {
+        fs::remove_file(metadata_path)?;
+        return Ok(());
+    }
+    let raw = root.join(&metadata.relative_path);
+    if !raw.is_file() || raw.metadata()?.len() <= 44 {
+        fs::remove_file(metadata_path)?;
+        return Ok(());
+    }
+    let recovered_relative = format!("recordings/raw/{}-recovered.wav", metadata.take_id);
+    let recovered = root.join(&recovered_relative);
+    let repaired = crate::tools::command("ffmpeg")
+        .args(["-y", "-i"])
+        .arg(&raw)
+        .args(["-ac", "1", "-ar", "48000", "-c:a", "pcm_s16le"])
+        .arg(&recovered)
+        .output()
+        .context("Could not start FFmpeg to recover the interrupted take")?;
+    if !repaired.status.success() {
+        bail!("An interrupted recording was found but could not be repaired");
+    }
+    let reader = hound::WavReader::open(&recovered)?;
+    let duration_us =
+        i64::from(reader.duration()) * 1_000_000 / i64::from(reader.spec().sample_rate.max(1));
+    drop(reader);
+    if duration_us < 100_000 {
+        fs::remove_file(metadata_path)?;
+        return Ok(());
+    }
+    let processed_relative = format!("recordings/processed/{}-recovered.wav", metadata.take_id);
+    if let Err(error) = crate::audio::enhance_dialogue(&recovered, &root.join(&processed_relative))
+    {
+        log::warn!("recovered take enhancement failed: {error}");
+        fs::copy(&recovered, root.join(&processed_relative))?;
+    }
+    let transaction = connection.transaction()?;
+    transaction.execute(
+        "UPDATE takes SET selected=0 WHERE block_id=?1",
+        params![metadata.block_id],
+    )?;
+    transaction.execute(
+        "INSERT INTO takes(id,block_id,relative_path,processed_relative_path,duration_us,selected,created_at) VALUES(?1,?2,?3,?4,?5,1,?6)",
+        params![metadata.take_id,metadata.block_id,recovered_relative,processed_relative,duration_us,metadata.created_at],
+    )?;
+    if let Some(tray_item_id) = transaction
+        .query_row(
+            "SELECT id FROM tray_items WHERE block_id=?1 ORDER BY position LIMIT 1",
+            params![metadata.block_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+    {
+        transaction.execute(
+            "INSERT INTO presentation_events(id,take_id,event_type,project_time_us,tray_item_id) VALUES(?1,?2,'activate',0,?3)",
+            params![Uuid::new_v4().to_string(),metadata.take_id,tray_item_id],
+        )?;
+    }
+    transaction.execute(
+        "UPDATE script_blocks SET status='recorded',alignment_stale=1 WHERE id=?1",
+        params![metadata.block_id],
+    )?;
+    transaction.commit()?;
+    fs::remove_file(metadata_path)?;
+    Ok(())
 }
 
 pub fn save_script(project_path: &str, script: &str) -> Result<ProjectSnapshot> {
@@ -229,6 +310,49 @@ pub fn update_block(project_path: &str, block: UpdateBlockInput) -> Result<Proje
         bail!("Script block was not found");
     }
     rebuild_script(&connection)?;
+    snapshot(&root, &connection)
+}
+
+pub fn update_settings(
+    project_path: &str,
+    input: UpdateProjectSettingsInput,
+) -> Result<ProjectSnapshot> {
+    if !(0.0..=1.0).contains(&input.music_volume) {
+        bail!("Music volume must be between 0 and 1");
+    }
+    if !matches!(input.caption_style.as_str(), "clean" | "bold" | "minimal") {
+        bail!("Unsupported caption style");
+    }
+    if !matches!(input.transition_style.as_str(), "cut" | "dissolve") {
+        bail!("Unsupported transition style");
+    }
+    let root = project_root(project_path)?;
+    let connection = connect(&root)?;
+    if let Some(asset_id) = &input.background_music_asset_id {
+        let media_type: Option<String> = connection
+            .query_row(
+                "SELECT media_type FROM media_assets WHERE id=?1",
+                params![asset_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if media_type.as_deref() != Some("audio") {
+            bail!("Background music must be an imported audio file");
+        }
+    }
+    connection.execute(
+        "UPDATE project SET background_music_asset_id=?1,music_volume=?2,music_ducking=?3,opening_card=?4,opening_title=?5,caption_style=?6,transition_style=?7,updated_at=?8",
+        params![
+            input.background_music_asset_id,
+            input.music_volume,
+            i64::from(input.music_ducking),
+            i64::from(input.opening_card),
+            input.opening_title.trim(),
+            input.caption_style,
+            input.transition_style,
+            Utc::now().to_rfc3339()
+        ],
+    )?;
     snapshot(&root, &connection)
 }
 
@@ -317,6 +441,95 @@ pub fn remove_tray_item(project_path: &str, tray_item_id: &str) -> Result<Projec
     snapshot(&root, &connection)
 }
 
+pub fn trash_asset(project_path: &str, asset_id: &str) -> Result<ProjectSnapshot> {
+    let root = project_root(project_path)?;
+    let mut connection = connect(&root)?;
+    let transaction = connection.transaction()?;
+    let used: i64 = transaction.query_row(
+        "SELECT COUNT(*) FROM tray_items WHERE asset_id=?1",
+        params![asset_id],
+        |row| row.get(0),
+    )?;
+    if used > 0 {
+        bail!("Remove this asset from every presentation tray before moving it to trash");
+    }
+    let paths: (String, Option<String>, Option<String>) = transaction
+        .query_row(
+            "SELECT relative_path,proxy_relative_path,thumbnail_relative_path FROM media_assets WHERE id=?1",
+            params![asset_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .context("Media asset was not found")?;
+    for relative in [Some(paths.0), paths.1, paths.2].into_iter().flatten() {
+        move_to_trash(&root, &relative)?;
+    }
+    transaction.execute(
+        "UPDATE project SET background_music_asset_id=NULL WHERE background_music_asset_id=?1",
+        params![asset_id],
+    )?;
+    transaction.execute("DELETE FROM media_assets WHERE id=?1", params![asset_id])?;
+    transaction.commit()?;
+    snapshot(&root, &connection)
+}
+
+pub fn trash_take(project_path: &str, take_id: &str) -> Result<ProjectSnapshot> {
+    let root = project_root(project_path)?;
+    let mut connection = connect(&root)?;
+    let transaction = connection.transaction()?;
+    let (block_id, raw, processed): (String, String, Option<String>) = transaction
+        .query_row(
+            "SELECT block_id,relative_path,processed_relative_path FROM takes WHERE id=?1",
+            params![take_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .context("Take was not found")?;
+    move_to_trash(&root, &raw)?;
+    if let Some(path) = processed {
+        move_to_trash(&root, &path)?;
+    }
+    transaction.execute("DELETE FROM takes WHERE id=?1", params![take_id])?;
+    let replacement: Option<String> = transaction
+        .query_row(
+            "SELECT id FROM takes WHERE block_id=?1 ORDER BY created_at DESC LIMIT 1",
+            params![block_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(replacement) = replacement {
+        transaction.execute(
+            "UPDATE takes SET selected=1 WHERE id=?1",
+            params![replacement],
+        )?;
+        transaction.execute(
+            "UPDATE script_blocks SET status='recorded',alignment_stale=1 WHERE id=?1",
+            params![block_id],
+        )?;
+    } else {
+        transaction.execute(
+            "UPDATE script_blocks SET status='prepared',alignment_stale=0 WHERE id=?1",
+            params![block_id],
+        )?;
+    }
+    transaction.commit()?;
+    snapshot(&root, &connection)
+}
+
+fn move_to_trash(root: &Path, relative: &str) -> Result<()> {
+    let source = root.join(relative);
+    if !source.is_file() {
+        return Ok(());
+    }
+    let name = source
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("item");
+    let destination = root
+        .join("trash")
+        .join(format!("{}-{name}", Uuid::new_v4()));
+    fs::rename(source, destination)?;
+    Ok(())
+}
+
 pub fn move_tray_item(
     project_path: &str,
     tray_item_id: &str,
@@ -400,6 +613,89 @@ pub fn move_block(project_path: &str, block_id: &str, direction: i64) -> Result<
     snapshot(&root, &connection)
 }
 
+pub fn split_block(
+    project_path: &str,
+    block_id: &str,
+    left_text: &str,
+    right_text: &str,
+) -> Result<ProjectSnapshot> {
+    if left_text.trim().is_empty() || right_text.trim().is_empty() {
+        bail!("Both sides of a split must contain text");
+    }
+    let root = project_root(project_path)?;
+    let mut connection = connect(&root)?;
+    let transaction = connection.transaction()?;
+    ensure_block_unused(&transaction, block_id)?;
+    let position: i64 = transaction
+        .query_row(
+            "SELECT position FROM script_blocks WHERE id=?1",
+            params![block_id],
+            |row| row.get(0),
+        )
+        .context("Block was not found")?;
+    transaction.execute(
+        "UPDATE script_blocks SET position=position+1 WHERE position>?1",
+        params![position],
+    )?;
+    transaction.execute(
+        "UPDATE script_blocks SET text=?1,alignment_stale=1 WHERE id=?2",
+        params![left_text.trim(), block_id],
+    )?;
+    transaction.execute(
+        "INSERT INTO script_blocks(id,position,text) VALUES(?1,?2,?3)",
+        params![Uuid::new_v4().to_string(), position + 1, right_text.trim()],
+    )?;
+    rebuild_script(&transaction)?;
+    transaction.commit()?;
+    snapshot(&root, &connection)
+}
+
+pub fn merge_block_with_next(project_path: &str, block_id: &str) -> Result<ProjectSnapshot> {
+    let root = project_root(project_path)?;
+    let mut connection = connect(&root)?;
+    let transaction = connection.transaction()?;
+    ensure_block_unused(&transaction, block_id)?;
+    let (position, text): (i64, String) = transaction
+        .query_row(
+            "SELECT position,text FROM script_blocks WHERE id=?1",
+            params![block_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .context("Block was not found")?;
+    let (next_id, next_text): (String, String) = transaction
+        .query_row(
+            "SELECT id,text FROM script_blocks WHERE position=?1",
+            params![position + 1],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .context("This is already the final block")?;
+    ensure_block_unused(&transaction, &next_id)?;
+    transaction.execute(
+        "UPDATE script_blocks SET text=?1,alignment_stale=1 WHERE id=?2",
+        params![format!("{} {}", text.trim(), next_text.trim()), block_id],
+    )?;
+    transaction.execute("DELETE FROM script_blocks WHERE id=?1", params![next_id])?;
+    transaction.execute(
+        "UPDATE script_blocks SET position=position-1 WHERE position>?1",
+        params![position + 1],
+    )?;
+    rebuild_script(&transaction)?;
+    transaction.commit()?;
+    snapshot(&root, &connection)
+}
+
+fn ensure_block_unused(connection: &Connection, block_id: &str) -> Result<()> {
+    let used: i64 = connection.query_row(
+        "SELECT (SELECT COUNT(*) FROM takes WHERE block_id=?1) + (SELECT COUNT(*) FROM tray_items WHERE block_id=?1)",
+        params![block_id],
+        |row| row.get(0),
+    )?;
+    if used > 0 {
+        bail!("Split or merge blocks before adding media or recording takes");
+    }
+    Ok(())
+}
+
 pub fn select_take(project_path: &str, take_id: &str) -> Result<ProjectSnapshot> {
     let root = project_root(project_path)?;
     let mut connection = connect(&root)?;
@@ -428,6 +724,9 @@ pub fn update_tray_item(project_path: &str, item: UpdateTrayItemInput) -> Result
     if !matches!(item.playback_mode.as_str(), "narrate_over" | "play_solo") {
         bail!("Unsupported playback mode");
     }
+    if !matches!(item.loop_mode.as_str(), "freeze" | "repeat") {
+        bail!("Unsupported loop mode");
+    }
     if item.in_point_us < 0 || item.out_point_us.is_some_and(|out| out <= item.in_point_us) {
         bail!("Invalid media range");
     }
@@ -447,11 +746,12 @@ pub fn update_tray_item(project_path: &str, item: UpdateTrayItemInput) -> Result
         bail!("Trim range exceeds the source duration");
     }
     let changed = connection.execute(
-        "UPDATE tray_items SET playback_mode=?1,in_point_us=?2,out_point_us=?3 WHERE id=?4",
+        "UPDATE tray_items SET playback_mode=?1,in_point_us=?2,out_point_us=?3,loop_mode=?4 WHERE id=?5",
         params![
             item.playback_mode,
             item.in_point_us,
             item.out_point_us,
+            item.loop_mode,
             item.id
         ],
     )?;
@@ -474,6 +774,14 @@ fn connect(root: &Path) -> Result<Connection> {
         "ALTER TABLE media_assets ADD COLUMN height INTEGER",
         "ALTER TABLE media_assets ADD COLUMN proxy_relative_path TEXT",
         "ALTER TABLE media_assets ADD COLUMN thumbnail_relative_path TEXT",
+        "ALTER TABLE tray_items ADD COLUMN loop_mode TEXT NOT NULL DEFAULT 'freeze'",
+        "ALTER TABLE project ADD COLUMN background_music_asset_id TEXT",
+        "ALTER TABLE project ADD COLUMN music_volume REAL NOT NULL DEFAULT 0.18",
+        "ALTER TABLE project ADD COLUMN music_ducking INTEGER NOT NULL DEFAULT 1",
+        "ALTER TABLE project ADD COLUMN opening_card INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE project ADD COLUMN opening_title TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE project ADD COLUMN caption_style TEXT NOT NULL DEFAULT 'clean'",
+        "ALTER TABLE project ADD COLUMN transition_style TEXT NOT NULL DEFAULT 'cut'",
     ] {
         let _ = connection.execute(migration, []);
     }
@@ -483,7 +791,7 @@ fn connect(root: &Path) -> Result<Connection> {
 fn snapshot(root: &Path, connection: &Connection) -> Result<ProjectSnapshot> {
     let project = connection
         .query_row(
-            "SELECT id, name, aspect_ratio, platform_target, script FROM project LIMIT 1",
+            "SELECT id,name,aspect_ratio,platform_target,script,background_music_asset_id,music_volume,music_ducking,opening_card,opening_title,caption_style,transition_style FROM project LIMIT 1",
             [],
             |row| {
                 Ok((
@@ -492,6 +800,13 @@ fn snapshot(root: &Path, connection: &Connection) -> Result<ProjectSnapshot> {
                     row.get(2)?,
                     row.get(3)?,
                     row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get::<_, i64>(7)? != 0,
+                    row.get::<_, i64>(8)? != 0,
+                    row.get(9)?,
+                    row.get(10)?,
+                    row.get(11)?,
                 ))
             },
         )
@@ -541,13 +856,22 @@ fn snapshot(root: &Path, connection: &Connection) -> Result<ProjectSnapshot> {
         aspect_ratio: project.2,
         platform_target: project.3,
         script: project.4,
+        settings: ProjectSettings {
+            background_music_asset_id: project.5,
+            music_volume: project.6,
+            music_ducking: project.7,
+            opening_card: project.8,
+            opening_title: project.9,
+            caption_style: project.10,
+            transition_style: project.11,
+        },
         blocks,
         assets,
     })
 }
 
 fn load_takes(connection: &Connection, block_id: &str) -> rusqlite::Result<Vec<Take>> {
-    let mut statement = connection.prepare("SELECT id,relative_path,processed_relative_path,duration_us,selected,created_at FROM takes WHERE block_id=?1 ORDER BY created_at DESC")?;
+    let mut statement = connection.prepare("SELECT t.id,t.relative_path,t.processed_relative_path,t.duration_us,t.selected,t.created_at,(SELECT COUNT(*) FROM aligned_words w WHERE w.take_id=t.id),(SELECT COUNT(*) FROM aligned_words w WHERE w.take_id=t.id AND w.matched=1),(SELECT text FROM transcripts x WHERE x.take_id=t.id) FROM takes t WHERE t.block_id=?1 ORDER BY t.created_at DESC")?;
     let takes = statement
         .query_map(params![block_id], |row| {
             Ok(Take {
@@ -557,6 +881,9 @@ fn load_takes(connection: &Connection, block_id: &str) -> rusqlite::Result<Vec<T
                 duration_us: row.get(3)?,
                 selected: row.get::<_, i64>(4)? != 0,
                 created_at: row.get(5)?,
+                alignment_total: row.get(6)?,
+                alignment_matched: row.get(7)?,
+                transcript: row.get(8)?,
             })
         })?
         .collect();
@@ -565,7 +892,7 @@ fn load_takes(connection: &Connection, block_id: &str) -> rusqlite::Result<Vec<T
 
 fn load_tray(connection: &Connection, block_id: &str) -> rusqlite::Result<Vec<TrayItem>> {
     let mut statement = connection.prepare(
-    "SELECT id, asset_id, position, playback_mode, in_point_us, out_point_us FROM tray_items WHERE block_id = ?1 ORDER BY position",
+    "SELECT id,asset_id,position,playback_mode,in_point_us,out_point_us,loop_mode FROM tray_items WHERE block_id=?1 ORDER BY position",
   )?;
     let items = statement
         .query_map(params![block_id], |row| {
@@ -576,6 +903,7 @@ fn load_tray(connection: &Connection, block_id: &str) -> rusqlite::Result<Vec<Tr
                 playback_mode: row.get(3)?,
                 in_point_us: row.get(4)?,
                 out_point_us: row.get(5)?,
+                loop_mode: row.get(6)?,
             })
         })?
         .collect();
@@ -654,7 +982,10 @@ fn unique_asset_name(hash: &str, name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{create, media_type, move_block, paragraphs, safe_folder_name, save_script};
+    use super::{
+        create, media_type, merge_block_with_next, move_block, move_to_trash, paragraphs,
+        safe_folder_name, save_script, split_block,
+    };
     use crate::models::CreateProjectInput;
 
     #[test]
@@ -702,6 +1033,29 @@ mod tests {
         assert_eq!(
             project.script,
             "Second block.\n\nEdited first block.\n\nThird block."
+        );
+        let third_id = project.blocks[2].id.clone();
+        let project = split_block(&project.path, &third_id, "Third", "block.").unwrap();
+        assert_eq!(project.blocks.len(), 4);
+        assert_eq!(project.blocks[2].text, "Third");
+        let project = merge_block_with_next(&project.path, &third_id).unwrap();
+        assert_eq!(project.blocks.len(), 3);
+        assert_eq!(project.blocks[2].text, "Third block.");
+    }
+
+    #[test]
+    fn moves_files_to_project_trash() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join("trash")).unwrap();
+        std::fs::create_dir(temp.path().join("assets")).unwrap();
+        std::fs::write(temp.path().join("assets/example.png"), b"fixture").unwrap();
+        move_to_trash(temp.path(), "assets/example.png").unwrap();
+        assert!(!temp.path().join("assets/example.png").exists());
+        assert_eq!(
+            std::fs::read_dir(temp.path().join("trash"))
+                .unwrap()
+                .count(),
+            1
         );
     }
 }

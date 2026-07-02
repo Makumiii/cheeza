@@ -23,6 +23,19 @@ pub struct UpdateTrayItemInput {
     pub playback_mode: String,
     pub in_point_us: i64,
     pub out_point_us: Option<i64>,
+    pub loop_mode: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateProjectSettingsInput {
+    pub background_music_asset_id: Option<String>,
+    pub music_volume: f64,
+    pub music_ducking: bool,
+    pub opening_card: bool,
+    pub opening_title: String,
+    pub caption_style: String,
+    pub transition_style: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -36,6 +49,19 @@ pub struct ProjectSnapshot {
     pub script: String,
     pub blocks: Vec<ScriptBlock>,
     pub assets: Vec<MediaAsset>,
+    pub settings: ProjectSettings,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectSettings {
+    pub background_music_asset_id: Option<String>,
+    pub music_volume: f64,
+    pub music_ducking: bool,
+    pub opening_card: bool,
+    pub opening_title: String,
+    pub caption_style: String,
+    pub transition_style: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -59,6 +85,9 @@ pub struct Take {
     pub duration_us: i64,
     pub selected: bool,
     pub created_at: String,
+    pub alignment_total: i64,
+    pub alignment_matched: i64,
+    pub transcript: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -85,4 +114,5 @@ pub struct TrayItem {
     pub playback_mode: String,
     pub in_point_us: i64,
     pub out_point_us: Option<i64>,
+    pub loop_mode: String,
 }

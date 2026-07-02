@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
@@ -12,10 +12,13 @@ import {
   Library,
   Mic2,
   Pause,
+  Pencil,
   Play,
   Plus,
   RotateCcw,
+  Scissors,
   Search,
+  Settings2,
   SkipBack,
   SkipForward,
   Sparkles,
@@ -52,6 +55,9 @@ function App() {
   const { project, activeBlockId, busy, error } = store;
   const [mode, setMode] = useState<"prepare" | "record">("prepare");
   const [notice, setNotice] = useState<string | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [blockEditorOpen, setBlockEditorOpen] = useState(false);
+  const [previewPath, setPreviewPath] = useState<string | null>(null);
   if (!project)
     return (
       <ProjectHome
@@ -75,6 +81,18 @@ function App() {
         projectPath,
       });
       setNotice(`Export ready: ${result.path}`);
+    } catch (reason) {
+      store.setError(String(reason));
+    } finally {
+      store.setBusy(false);
+    }
+  }
+  async function previewVideo() {
+    store.setBusy(true);
+    store.setError(null);
+    try {
+      const result = await invoke<{ path: string }>("preview_project", { projectPath });
+      setPreviewPath(result.path);
     } catch (reason) {
       store.setError(String(reason));
     } finally {
@@ -133,8 +151,14 @@ function App() {
         <span className="save-state">
           <span /> Local project
         </span>
+        <button className="icon-button" onClick={() => setSettingsOpen(true)} aria-label="Production settings">
+          <Settings2 size={18} />
+        </button>
+        <button className="preview-button" onClick={previewVideo} disabled={busy}>
+          <Play size={15} fill="currentColor" /> Preview
+        </button>
         <button className="export-button" onClick={exportVideo} disabled={busy}>
-          <Play size={15} fill="currentColor" /> Export video
+          Export video
         </button>
       </header>
       <section className="workspace">
@@ -186,6 +210,7 @@ function App() {
                   <button disabled>Record</button>
                   <button disabled>Review</button>
                 </div>
+                <button className="edit-block-button" onClick={() => setBlockEditorOpen(true)} disabled={!activeBlock}><Pencil size={13} /> Edit block</button>
                 <span className="stage-hint">
                   Block {activeBlock ? activeBlock.position + 1 : 0} of{" "}
                   {project.blocks.length}
@@ -277,6 +302,35 @@ function App() {
           <button onClick={() => setNotice(null)}>Dismiss</button>
         </div>
       )}
+      {settingsOpen && (
+        <ProductionSettings
+          project={project}
+          onUpdate={store.setProject}
+          onClose={() => setSettingsOpen(false)}
+          setBusy={store.setBusy}
+          setError={store.setError}
+        />
+      )}
+      {blockEditorOpen && activeBlock && (
+        <BlockEditor
+          project={project}
+          block={activeBlock}
+          onUpdate={store.setProject}
+          onClose={() => setBlockEditorOpen(false)}
+          setBusy={store.setBusy}
+          setError={store.setError}
+        />
+      )}
+      {previewPath && (
+        <div className="modal-backdrop" onMouseDown={() => setPreviewPath(null)}>
+          <section className="modal preview-modal" onMouseDown={(event) => event.stopPropagation()}>
+            <span className="eyebrow">Project preview</span>
+            <h2>Review the assembled cut.</h2>
+            <video controls autoPlay src={convertFileSrc(previewPath)} />
+            <div className="modal-actions"><button className="secondary-button" onClick={() => setPreviewPath(null)}>Close</button><button className="primary-button" onClick={() => { setPreviewPath(null); void exportVideo(); }}>Export final</button></div>
+          </section>
+        </div>
+      )}
     </main>
   );
 }
@@ -316,6 +370,8 @@ function RecordingStudio({
   const [devices, setDevices] = useState<string[]>([]);
   const [deviceName, setDeviceName] = useState("");
   const [inputLevel, setInputLevel] = useState(0);
+  const [checkingMic, setCheckingMic] = useState(false);
+  const [soundCheck, setSoundCheck] = useState<{ peakLevel: number; verdict: string } | null>(null);
   const activeCue = block.tray[cueIndex];
 
   useEffect(() => {
@@ -401,6 +457,13 @@ function RecordingStudio({
       setError(String(reason));
       setPhase("ready");
     }
+  }
+  async function checkMicrophone() {
+    setCheckingMic(true);
+    setSoundCheck(null);
+    try { setSoundCheck(await invoke("sound_check", { deviceName: deviceName || null })); }
+    catch (reason) { setError(String(reason)); }
+    finally { setCheckingMic(false); }
   }
 
   async function activateCue(index: number) {
@@ -507,6 +570,7 @@ function RecordingStudio({
               withAudio={activeCue.playbackMode === "play_solo"}
               inPointUs={activeCue.inPointUs}
               outPointUs={activeCue.outPointUs}
+              loopMode={activeCue.loopMode}
             />
           )}
           {phase === "countdown" && (
@@ -553,6 +617,8 @@ function RecordingStudio({
                 {devices.map((device) => <option key={device} value={device}>{device}</option>)}
               </select>
             </label>
+            <button className="sound-check-button" disabled={checkingMic} onClick={checkMicrophone}>{checkingMic ? "Listening…" : "Test mic"}</button>
+            {soundCheck && <span className={`sound-check-result ${soundCheck.verdict}`}>{soundCheck.verdict === "good" ? "Level is good" : soundCheck.verdict === "quiet" ? "Move closer" : soundCheck.verdict === "hot" ? "Reduce gain" : "No signal"}</span>}
             <button className="control begin" onClick={begin}>
               <Mic2 size={20} />
               <span>Begin take</span>
@@ -609,6 +675,106 @@ function RecordingStudio({
           <RotateCcw size={12} /> Retakes preserve this take
         </span>
       </div>
+    </div>
+  );
+}
+
+function BlockEditor({
+  project,
+  block,
+  onUpdate,
+  onClose,
+  setBusy,
+  setError,
+}: AsyncProps & { block: ProjectSnapshot["blocks"][number]; onClose: () => void }) {
+  const [text, setText] = useState(block.text);
+  const textarea = useRef<HTMLTextAreaElement>(null);
+  const structuralEditAllowed = block.tray.length === 0 && block.takes.length === 0;
+  async function mutate(command: string, payload: object) {
+    setBusy(true);
+    setError(null);
+    try {
+      onUpdate(await invoke<ProjectSnapshot>(command, { projectPath: project.path, ...payload }));
+      onClose();
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+  function splitAtCursor() {
+    const cursor = textarea.current?.selectionStart ?? 0;
+    void mutate("split_block", { blockId: block.id, leftText: text.slice(0, cursor), rightText: text.slice(cursor) });
+  }
+  return (
+    <div className="modal-backdrop" onMouseDown={onClose}>
+      <section className="modal block-editor" onMouseDown={(event) => event.stopPropagation()}>
+        <span className="eyebrow">Script block {block.position + 1}</span>
+        <h2>Edit the narration unit.</h2>
+        <textarea ref={textarea} autoFocus value={text} onChange={(event) => setText(event.target.value)} />
+        <p>Place the cursor where a new block should begin, then choose split. Structural changes are available before media or takes are attached.</p>
+        <div className="block-structure-actions">
+          <button disabled={!structuralEditAllowed || !text.trim()} onClick={splitAtCursor}><Scissors size={14} /> Split at cursor</button>
+          <button disabled={!structuralEditAllowed || block.position === project.blocks.length - 1} onClick={() => mutate("merge_block_with_next", { blockId: block.id })}>Merge with next</button>
+        </div>
+        <div className="modal-actions"><button className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button" disabled={!text.trim()} onClick={() => mutate("update_block", { block: { id: block.id, text } })}>Save block</button></div>
+      </section>
+    </div>
+  );
+}
+
+function ProductionSettings({
+  project,
+  onUpdate,
+  onClose,
+  setBusy,
+  setError,
+}: AsyncProps & { onClose: () => void }) {
+  const [settings, setSettings] = useState({ ...project.settings });
+  const audioAssets = project.assets.filter((asset) => asset.mediaType === "audio");
+  async function save() {
+    setBusy(true);
+    setError(null);
+    try {
+      onUpdate(
+        await invoke<ProjectSnapshot>("update_project_settings", {
+          projectPath: project.path,
+          input: settings,
+        }),
+      );
+      onClose();
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <div className="modal-backdrop" onMouseDown={onClose}>
+      <section className="modal production-settings" onMouseDown={(event) => event.stopPropagation()}>
+        <span className="eyebrow">Production settings</span>
+        <h2>Shape the finished video.</h2>
+        <div className="settings-grid">
+          <div className="settings-group">
+            <h3>Soundtrack</h3>
+            <label>Background music<select value={settings.backgroundMusicAssetId ?? ""} onChange={(event) => setSettings({ ...settings, backgroundMusicAssetId: event.target.value || null })}><option value="">No music</option>{audioAssets.map((asset) => <option key={asset.id} value={asset.id}>{asset.name}</option>)}</select></label>
+            <label className="range-label">Music level <strong>{Math.round(settings.musicVolume * 100)}%</strong><input type="range" min="0" max="0.5" step="0.01" value={settings.musicVolume} onChange={(event) => setSettings({ ...settings, musicVolume: Number(event.target.value) })} /></label>
+            <label className="switch-row"><input type="checkbox" checked={settings.musicDucking} onChange={(event) => setSettings({ ...settings, musicDucking: event.target.checked })} /><span><strong>Automatic ducking</strong><small>Lower music while narration is present.</small></span></label>
+          </div>
+          <div className="settings-group">
+            <h3>Opening</h3>
+            <label className="switch-row"><input type="checkbox" checked={settings.openingCard} onChange={(event) => setSettings({ ...settings, openingCard: event.target.checked })} /><span><strong>Opening title card</strong><small>Add a 1.5 second branded opener.</small></span></label>
+            <label>Title<input value={settings.openingTitle} disabled={!settings.openingCard} placeholder={project.name} onChange={(event) => setSettings({ ...settings, openingTitle: event.target.value })} /></label>
+          </div>
+          <div className="settings-group">
+            <h3>Finishing</h3>
+            <label>Caption style<select value={settings.captionStyle} onChange={(event) => setSettings({ ...settings, captionStyle: event.target.value as typeof settings.captionStyle })}><option value="clean">Clean</option><option value="bold">Bold social</option><option value="minimal">Minimal</option></select></label>
+            <label>Between blocks<select value={settings.transitionStyle} onChange={(event) => setSettings({ ...settings, transitionStyle: event.target.value as typeof settings.transitionStyle })}><option value="cut">Crisp cut</option><option value="dissolve">Short dissolve</option></select></label>
+            <p className="settings-note">Every export also creates an exact-script SRT and a JPEG thumbnail beside the MP4.</p>
+          </div>
+        </div>
+        <div className="modal-actions"><button className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button" onClick={save}>Save settings</button></div>
+      </section>
     </div>
   );
 }
@@ -933,6 +1099,12 @@ function MediaDock({ project, onUpdate, setBusy, setError }: AsyncProps) {
       setBusy(false);
     }
   }
+  async function trashAsset(assetId: string) {
+    setBusy(true); setError(null);
+    try { onUpdate(await invoke<ProjectSnapshot>("trash_asset", { projectPath: project.path, assetId })); }
+    catch (reason) { setError(String(reason)); }
+    finally { setBusy(false); }
+  }
   return (
     <aside className="media-panel">
       <div className="panel-heading">
@@ -956,6 +1128,7 @@ function MediaDock({ project, onUpdate, setBusy, setError }: AsyncProps) {
         {filtered.map((asset) => (
           <div className="asset-card" key={asset.id}>
             <AssetPreview project={project} assetId={asset.id} />
+            <button className="asset-trash" aria-label={`Move ${asset.name} to trash`} onClick={() => trashAsset(asset.id)}><Trash2 size={12} /></button>
             <span title={asset.name}>{asset.name}</span>
             <small>{asset.mediaType}</small>
           </div>
@@ -1020,6 +1193,7 @@ function Tray({
                     playbackMode: event.target.value,
                     inPointUs: item.inPointUs,
                     outPointUs: item.outPointUs,
+                    loopMode: item.loopMode,
                   },
                 })
               }
@@ -1027,6 +1201,11 @@ function Tray({
               <option value="narrate_over">Voice over</option>
               <option value="play_solo">Play solo</option>
             </select>
+            {(() => {
+              const asset = project.assets.find((candidate) => candidate.id === item.assetId);
+              if (!asset || (asset.mediaType !== "video" && !asset.name.toLowerCase().endsWith(".gif"))) return null;
+              return <select className="loop-select" value={item.loopMode} onChange={(event) => mutate("update_tray_item", { item: { ...item, loopMode: event.target.value } })}><option value="freeze">Play once</option><option value="repeat">Loop</option></select>;
+            })()}
             {project.assets.find((asset) => asset.id === item.assetId)?.durationUs && (
               <div className="trim-fields" title="Trim range in seconds">
                 <label>In <input type="number" min="0" step="0.1" value={(item.inPointUs / 1_000_000).toFixed(1)} onChange={(event) => mutate("update_tray_item", { item: { ...item, inPointUs: Math.round(Number(event.target.value) * 1_000_000) } })} /></label>
@@ -1080,6 +1259,12 @@ function TakeReview({ project, block, onUpdate, setBusy, setError }: AsyncProps 
       setBusy(false);
     }
   }
+  async function trashTake(takeId: string) {
+    setBusy(true); setError(null);
+    try { onUpdate(await invoke<ProjectSnapshot>("trash_take", { projectPath: project.path, takeId })); }
+    catch (reason) { setError(String(reason)); }
+    finally { setBusy(false); }
+  }
   return (
     <section className="take-review">
       <div><strong>Saved takes</strong><span>Retakes are non-destructive. Choose the take used in export.</span></div>
@@ -1089,7 +1274,8 @@ function TakeReview({ project, block, onUpdate, setBusy, setError }: AsyncProps 
             <input type="radio" checked={take.selected} onChange={() => selectTake(take.id)} />
             <span>Take {block.takes.length - index}</span>
             <audio controls preload="metadata" src={convertFileSrc(`${project.path}/${take.processedRelativePath ?? take.relativePath}`)} />
-            <small>{(take.durationUs / 1_000_000).toFixed(1)}s</small>
+            <small title={take.transcript ?? "Caption alignment pending"}>{(take.durationUs / 1_000_000).toFixed(1)}s{take.alignmentTotal > 0 ? ` · ${Math.round((take.alignmentMatched / take.alignmentTotal) * 100)}%` : " · pending"}</small>
+            <button className="take-trash" aria-label="Move take to trash" onClick={(event) => { event.preventDefault(); void trashTake(take.id); }}><Trash2 size={12} /></button>
           </label>
         ))}
       </div>
@@ -1104,6 +1290,7 @@ function AssetPreview({
   withAudio = false,
   inPointUs = 0,
   outPointUs = null,
+  loopMode = "freeze",
 }: {
   project: ProjectSnapshot;
   assetId: string;
@@ -1111,6 +1298,7 @@ function AssetPreview({
   withAudio?: boolean;
   inPointUs?: number;
   outPointUs?: number | null;
+  loopMode?: "freeze" | "repeat";
 }) {
   const asset = project.assets.find((item) => item.id === assetId);
   if (!asset) return null;
@@ -1126,6 +1314,7 @@ function AssetPreview({
         src={source}
         muted={!withAudio}
         autoPlay={playing}
+        loop={loopMode === "repeat"}
         onLoadedMetadata={(event) => { event.currentTarget.currentTime = inPointUs / 1_000_000; }}
         onTimeUpdate={(event) => {
           if (outPointUs != null && event.currentTarget.currentTime >= outPointUs / 1_000_000) event.currentTarget.pause();

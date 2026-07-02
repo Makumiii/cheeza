@@ -8,7 +8,10 @@ mod render;
 mod speech;
 mod tools;
 
-use models::{CreateProjectInput, ProjectSnapshot, UpdateBlockInput, UpdateTrayItemInput};
+use models::{
+    CreateProjectInput, ProjectSnapshot, UpdateBlockInput, UpdateProjectSettingsInput,
+    UpdateTrayItemInput,
+};
 use recorder::{RecordingState, RecordingStatus};
 
 #[tauri::command]
@@ -40,6 +43,13 @@ fn update_block(project_path: String, block: UpdateBlockInput) -> Result<Project
     project::update_block(&project_path, block).map_err(|error| error.to_string())
 }
 #[tauri::command]
+fn update_project_settings(
+    project_path: String,
+    input: UpdateProjectSettingsInput,
+) -> Result<ProjectSnapshot, String> {
+    project::update_settings(&project_path, input).map_err(|error| error.to_string())
+}
+#[tauri::command]
 fn import_media(
     project_path: String,
     source_paths: Vec<String>,
@@ -57,6 +67,14 @@ fn add_tray_item(
 #[tauri::command]
 fn remove_tray_item(project_path: String, tray_item_id: String) -> Result<ProjectSnapshot, String> {
     project::remove_tray_item(&project_path, &tray_item_id).map_err(|error| error.to_string())
+}
+#[tauri::command]
+fn trash_asset(project_path: String, asset_id: String) -> Result<ProjectSnapshot, String> {
+    project::trash_asset(&project_path, &asset_id).map_err(|error| error.to_string())
+}
+#[tauri::command]
+fn trash_take(project_path: String, take_id: String) -> Result<ProjectSnapshot, String> {
+    project::trash_take(&project_path, &take_id).map_err(|error| error.to_string())
 }
 #[tauri::command]
 fn update_tray_item(
@@ -83,12 +101,33 @@ fn move_block(
     project::move_block(&project_path, &block_id, direction).map_err(|error| error.to_string())
 }
 #[tauri::command]
+fn split_block(
+    project_path: String,
+    block_id: String,
+    left_text: String,
+    right_text: String,
+) -> Result<ProjectSnapshot, String> {
+    project::split_block(&project_path, &block_id, &left_text, &right_text)
+        .map_err(|error| error.to_string())
+}
+#[tauri::command]
+fn merge_block_with_next(
+    project_path: String,
+    block_id: String,
+) -> Result<ProjectSnapshot, String> {
+    project::merge_block_with_next(&project_path, &block_id).map_err(|error| error.to_string())
+}
+#[tauri::command]
 fn select_take(project_path: String, take_id: String) -> Result<ProjectSnapshot, String> {
     project::select_take(&project_path, &take_id).map_err(|error| error.to_string())
 }
 #[tauri::command]
 fn list_input_devices() -> Result<Vec<String>, String> {
     recorder::input_devices().map_err(|error| error.to_string())
+}
+#[tauri::command]
+fn sound_check(device_name: Option<String>) -> Result<recorder::SoundCheck, String> {
+    recorder::sound_check(device_name.as_deref()).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -171,6 +210,10 @@ fn stop_recording(state: tauri::State<'_, RecordingState>) -> Result<ProjectSnap
 fn export_project(project_path: String) -> Result<render::ExportResult, String> {
     render::export(&project_path).map_err(|error| error.to_string())
 }
+#[tauri::command]
+fn preview_project(project_path: String) -> Result<render::ExportResult, String> {
+    render::preview(&project_path).map_err(|error| error.to_string())
+}
 
 #[tauri::command]
 fn align_block(project_path: String, block_id: String) -> Result<Vec<speech::AlignedWord>, String> {
@@ -199,14 +242,20 @@ pub fn run() {
             save_script,
             read_script_file,
             update_block,
+            update_project_settings,
             import_media,
             add_tray_item,
             remove_tray_item,
+            trash_asset,
+            trash_take,
             update_tray_item,
             move_tray_item,
             move_block,
+            split_block,
+            merge_block_with_next,
             select_take,
             list_input_devices,
+            sound_check,
             start_recording,
             pause_recording,
             resume_recording,
@@ -216,6 +265,7 @@ pub fn run() {
             end_media_break,
             stop_recording,
             export_project,
+            preview_project,
             align_block
         ])
         .run(tauri::generate_context!())

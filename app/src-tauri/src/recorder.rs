@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use hound::{SampleFormat, WavSpec, WavWriter};
 use parking_lot::Mutex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     fs::File,
     io::BufWriter,
@@ -63,6 +63,21 @@ pub struct RecordingStatus {
     pub input_level: f32,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+pub struct RecoveryMetadata {
+    pub take_id: String,
+    pub block_id: String,
+    pub relative_path: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SoundCheck {
+    pub peak_level: f32,
+    pub verdict: String,
+}
+
 pub fn input_devices() -> Result<Vec<String>> {
     let mut names = cpal::default_host()
         .input_devices()?
@@ -80,20 +95,7 @@ pub fn input_devices() -> Result<Vec<String>> {
 
 pub fn start(project_path: &str, block_id: &str, device_name: Option<&str>) -> Result<Recorder> {
     let project_path = PathBuf::from(project_path);
-    let host = cpal::default_host();
-    let device = match device_name {
-        Some(name) => host
-            .input_devices()?
-            .find(|device| {
-                device
-                    .description()
-                    .is_ok_and(|description| description.name() == name)
-            })
-            .with_context(|| format!("Input device is unavailable: {name}"))?,
-        None => host
-            .default_input_device()
-            .context("No microphone is available")?,
-    };
+    let device = input_device(device_name)?;
     let supported = device.default_input_config()?;
     let sample_format = supported.sample_format();
     let config: cpal::StreamConfig = supported.into();
@@ -146,6 +148,16 @@ pub fn start(project_path: &str, block_id: &str, device_name: Option<&str>) -> R
         format => bail!("Unsupported microphone sample format: {format}"),
     };
     stream.play()?;
+    let recovery = RecoveryMetadata {
+        take_id: take_id.clone(),
+        block_id: block_id.to_owned(),
+        relative_path: relative_path.clone(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+    std::fs::write(
+        project_path.join("cache/active-recording.json"),
+        serde_json::to_vec_pretty(&recovery)?,
+    )?;
     Ok(Recorder {
         take_id,
         project_path,
@@ -162,6 +174,98 @@ pub fn start(project_path: &str, block_id: &str, device_name: Option<&str>) -> R
         stream,
         events: Vec::new(),
     })
+}
+
+pub fn sound_check(device_name: Option<&str>) -> Result<SoundCheck> {
+    let device = input_device(device_name)?;
+    let supported = device.default_input_config()?;
+    let sample_format = supported.sample_format();
+    let config: cpal::StreamConfig = supported.into();
+    let channels = usize::from(config.channels);
+    let peak = Arc::new(AtomicU32::new(0));
+    let stream = match sample_format {
+        cpal::SampleFormat::F32 => {
+            level_stream(&device, &config, peak.clone(), channels, |value: f32| {
+                (value.clamp(-1.0, 1.0) * i16::MAX as f32) as i16
+            })?
+        }
+        cpal::SampleFormat::I16 => {
+            level_stream(&device, &config, peak.clone(), channels, |value: i16| value)?
+        }
+        cpal::SampleFormat::U16 => {
+            level_stream(&device, &config, peak.clone(), channels, |value: u16| {
+                (value as i32 - 32_768) as i16
+            })?
+        }
+        format => bail!("Unsupported microphone sample format: {format}"),
+    };
+    stream.play()?;
+    std::thread::sleep(Duration::from_secs(2));
+    stream.pause()?;
+    let peak_level = peak.load(Ordering::Relaxed) as f32 / i16::MAX as f32;
+    let verdict = if peak_level < 0.01 {
+        "silent"
+    } else if peak_level < 0.08 {
+        "quiet"
+    } else if peak_level > 0.92 {
+        "hot"
+    } else {
+        "good"
+    };
+    Ok(SoundCheck {
+        peak_level,
+        verdict: verdict.into(),
+    })
+}
+
+fn input_device(device_name: Option<&str>) -> Result<cpal::Device> {
+    let host = cpal::default_host();
+    match device_name {
+        Some(name) => host
+            .input_devices()?
+            .find(|device| {
+                device
+                    .description()
+                    .is_ok_and(|description| description.name() == name)
+            })
+            .with_context(|| format!("Input device is unavailable: {name}")),
+        None => host
+            .default_input_device()
+            .context("No microphone is available"),
+    }
+}
+
+fn level_stream<T, F>(
+    device: &cpal::Device,
+    config: &cpal::StreamConfig,
+    peak: Arc<AtomicU32>,
+    channels: usize,
+    convert: F,
+) -> Result<cpal::Stream>
+where
+    T: cpal::SizedSample + Copy,
+    F: Fn(T) -> i16 + Send + Sync + 'static,
+{
+    Ok(device.build_input_stream(
+        config,
+        move |samples: &[T], _| {
+            let callback_peak = samples
+                .chunks(channels)
+                .map(|frame| {
+                    let mono = (frame
+                        .iter()
+                        .map(|sample| i64::from(convert(*sample)))
+                        .sum::<i64>()
+                        / frame.len() as i64) as i16;
+                    u32::from(mono.unsigned_abs())
+                })
+                .max()
+                .unwrap_or(0);
+            peak.fetch_max(callback_peak, Ordering::Relaxed);
+        },
+        |error| log::error!("microphone sound-check error: {error}"),
+        None,
+    )?)
 }
 
 fn build_stream<T, F>(
