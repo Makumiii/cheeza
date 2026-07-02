@@ -1,0 +1,57 @@
+name: Windows release
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install application dependencies
+        run: |
+          npm ci --prefix app
+          python -m pip install -r workers/requirements.txt pyinstaller huggingface-hub
+      - name: Bundle offline speech worker and model
+        run: |
+          New-Item -ItemType Directory -Force app/src-tauri/resources/bin | Out-Null
+          New-Item -ItemType Directory -Force app/src-tauri/resources/models/small.en | Out-Null
+          pyinstaller --onefile --name speech-worker --distpath app/src-tauri/resources/bin workers/speech_worker.py
+          huggingface-cli download Systran/faster-whisper-small.en --local-dir app/src-tauri/resources/models/small.en
+      - name: Bundle FFmpeg and FFprobe
+        run: |
+          Invoke-WebRequest https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip -OutFile $env:RUNNER_TEMP/ffmpeg.zip
+          Expand-Archive $env:RUNNER_TEMP/ffmpeg.zip -DestinationPath $env:RUNNER_TEMP/ffmpeg
+          Copy-Item (Get-ChildItem $env:RUNNER_TEMP/ffmpeg -Recurse -Filter ffmpeg.exe | Select-Object -First 1).FullName app/src-tauri/resources/bin/ffmpeg.exe
+          Copy-Item (Get-ChildItem $env:RUNNER_TEMP/ffmpeg -Recurse -Filter ffprobe.exe | Select-Object -First 1).FullName app/src-tauri/resources/bin/ffprobe.exe
+      - name: Validate
+        run: |
+          npm run build --prefix app
+          cargo test --manifest-path app/src-tauri/Cargo.toml
+          cargo clippy --all-targets --manifest-path app/src-tauri/Cargo.toml -- -D warnings
+      - name: Build NSIS installer
+        run: npm run tauri --prefix app -- build --bundles nsis
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Cheeza-Windows
+          path: app/src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error

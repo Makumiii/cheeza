@@ -26,17 +26,30 @@ pub fn align_block(project_path: &str, block_id: &str) -> Result<Vec<AlignedWord
         .parent()
         .and_then(|path| path.parent())
         .context("Cannot locate Cheeza worker")?;
+    let bundled = crate::tools::bundled("speech-worker");
     let python = std::env::var_os("CHEEZA_PYTHON")
         .map(PathBuf::from)
         .unwrap_or_else(|| repository.join(".venv/bin/python"));
     let worker = repository.join("workers/speech_worker.py");
-    let output = Command::new(&python)
-        .arg(&worker)
+    let mut command = bundled.as_ref().map_or_else(
+        || {
+            let mut command = Command::new(&python);
+            command.arg(&worker);
+            command
+        },
+        Command::new,
+    );
+    let output = command
         .args(["--audio"])
         .arg(root.join(audio))
         .args(["--script", &script, "--model", "small.en"])
         .output()
-        .with_context(|| format!("Could not start speech worker with {}", python.display()))?;
+        .with_context(|| {
+            format!(
+                "Could not start speech worker with {}",
+                bundled.as_ref().unwrap_or(&python).display()
+            )
+        })?;
     if !output.status.success() {
         bail!(
             "Speech alignment failed: {}",

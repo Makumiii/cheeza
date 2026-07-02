@@ -51,7 +51,7 @@ pub fn prepare(
     let thumbnail_relative = format!("assets/thumbnails/{asset_id}.jpg");
     let thumbnail = root.join(&thumbnail_relative);
     if media_type != "audio" {
-        run(Command::new("ffmpeg")
+        run(crate::tools::command("ffmpeg")
             .args(["-y", "-ss", "0", "-i"])
             .arg(&source)
             .args([
@@ -66,7 +66,7 @@ pub fn prepare(
     }
     let proxy_relative = if media_type == "video" {
         let relative = format!("assets/proxies/{asset_id}.mp4");
-        run(Command::new("ffmpeg")
+        run(crate::tools::command("ffmpeg")
             .args(["-y", "-i"])
             .arg(&source)
             .args([
@@ -101,7 +101,7 @@ pub fn prepare(
 }
 
 fn probe(path: &Path) -> Result<Probe> {
-    let output = Command::new("ffprobe")
+    let output = crate::tools::command("ffprobe")
         .args([
             "-v",
             "error",

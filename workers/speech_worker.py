@@ -4,6 +4,8 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import os
+import sys
 from difflib import SequenceMatcher
 from pathlib import Path
 
@@ -38,7 +40,9 @@ def align_script(script: str, recognized: list[dict]) -> list[dict]:
 def transcribe(audio: Path, script: str, model_name: str) -> dict:
     from faster_whisper import WhisperModel
 
-    model = WhisperModel(model_name, device="cpu", compute_type="int8", cpu_threads=2)
+    bundled_model = Path(sys.executable).parent.parent / "models" / model_name
+    model_source = Path(os.environ["CHEEZA_MODEL_DIR"]) if "CHEEZA_MODEL_DIR" in os.environ else (bundled_model if bundled_model.exists() else model_name)
+    model = WhisperModel(str(model_source), device="cpu", compute_type="int8", cpu_threads=max(1, min(4, os.cpu_count() or 2)))
     segments, info = model.transcribe(str(audio), language="en", beam_size=5, vad_filter=True, word_timestamps=True, initial_prompt=script)
     words = [{"word": word.word, "start": word.start, "end": word.end, "probability": word.probability} for segment in segments for word in (segment.words or [])]
     return {"language": info.language, "confidence": info.language_probability, "transcript": "".join(word["word"] for word in words).strip(), "words": align_script(script, words)}

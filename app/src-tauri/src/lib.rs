@@ -6,6 +6,7 @@ mod project;
 mod recorder;
 mod render;
 mod speech;
+mod tools;
 
 use models::{CreateProjectInput, ProjectSnapshot, UpdateBlockInput, UpdateTrayItemInput};
 use recorder::{RecordingState, RecordingStatus};

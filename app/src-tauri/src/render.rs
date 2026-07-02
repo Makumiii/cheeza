@@ -101,7 +101,7 @@ pub fn export(project_path: &str) -> Result<ExportResult> {
         .replace('\\', "\\\\")
         .replace(':', "\\:")
         .replace('\'', "\\'");
-    run(Command::new("ffmpeg").args(["-y", "-i"]).arg(&assembled).args(["-vf", &format!("subtitles='{subtitle}':force_style='FontName=Arial,FontSize=18,PrimaryColour=&H00FFFFFF,OutlineColour=&H00101010,Outline=3,Shadow=0,Alignment=2,MarginV=110'"), "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-c:a", "copy", "-movflags", "+faststart"]).arg(&output))?;
+    run(crate::tools::command("ffmpeg").args(["-y", "-i"]).arg(&assembled).args(["-vf", &format!("subtitles='{subtitle}':force_style='FontName=Arial,FontSize=18,PrimaryColour=&H00FFFFFF,OutlineColour=&H00101010,Outline=3,Shadow=0,Alignment=2,MarginV=110'"), "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-c:a", "copy", "-movflags", "+faststart"]).arg(&output))?;
     Ok(ExportResult {
         path: output.to_string_lossy().into_owned(),
         duration_us: blocks.iter().map(|block| block.duration_us).sum(),
@@ -186,7 +186,7 @@ fn render_block(
         .enumerate()
         .filter(|(_, cue)| cue.playback_mode == "play_solo" && cue.media_type == "video")
         .collect::<Vec<_>>();
-    let mut command = Command::new("ffmpeg");
+    let mut command = crate::tools::command("ffmpeg");
     command
         .args(["-y", "-i"])
         .arg(&visual)
@@ -258,7 +258,7 @@ fn render_cue(cue: &Cue, duration_us: i64, dimensions: &str, output: &Path) -> R
     let duration = format!("{:.6}", duration_us as f64 / 1_000_000.0);
     let seek = format!("{:.6}", cue.in_point_us as f64 / 1_000_000.0);
     let filter = format!("scale={dimensions}:force_original_aspect_ratio=increase,crop={dimensions},setsar=1,fps=30,format=yuv420p");
-    let mut command = Command::new("ffmpeg");
+    let mut command = crate::tools::command("ffmpeg");
     command.arg("-y");
     if cue.media_type == "image" {
         command.args(["-loop", "1", "-i"]);
@@ -283,7 +283,7 @@ fn concat(files: &[PathBuf], list_path: &Path, output: &Path, audio: bool) -> Re
             .map(|path| format!("file '{}'\n", path.to_string_lossy().replace('\'', "'\\''")))
             .collect::<String>(),
     )?;
-    let mut command = Command::new("ffmpeg");
+    let mut command = crate::tools::command("ffmpeg");
     command
         .args(["-y", "-f", "concat", "-safe", "0", "-i"])
         .arg(list_path)
@@ -312,7 +312,11 @@ fn run(command: &mut Command) -> Result<()> {
     Ok(())
 }
 fn ensure_ffmpeg() -> Result<()> {
-    if Command::new("ffmpeg").arg("-version").output().is_err() {
+    if crate::tools::command("ffmpeg")
+        .arg("-version")
+        .output()
+        .is_err()
+    {
         bail!("FFmpeg is not installed");
     }
     Ok(())
