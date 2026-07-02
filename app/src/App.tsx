@@ -3,19 +3,19 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   ArrowLeft,
+  ArrowDown,
+  ArrowUp,
   ChevronRight,
   FileText,
   FolderOpen,
   ImagePlus,
   Library,
   Mic2,
-  MoreHorizontal,
   Pause,
   Play,
   Plus,
   RotateCcw,
   Search,
-  Settings2,
   SkipBack,
   SkipForward,
   Sparkles,
@@ -98,6 +98,19 @@ function App() {
       store.setBusy(false);
     }
   }
+  async function moveBlock(blockId: string, direction: number) {
+    try {
+      store.setProject(
+        await invoke<ProjectSnapshot>("move_block", {
+          projectPath,
+          blockId,
+          direction,
+        }),
+      );
+    } catch (reason) {
+      store.setError(String(reason));
+    }
+  }
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -119,11 +132,8 @@ function App() {
         <span className="save-state">
           <span /> Saved locally
         </span>
-        <button className="icon-button" aria-label="Project settings">
-          <Settings2 size={18} />
-        </button>
         <button className="export-button" onClick={exportVideo} disabled={busy}>
-          <Play size={15} fill="currentColor" /> Preview
+          <Play size={15} fill="currentColor" /> Export video
         </button>
       </header>
       <section className="workspace">
@@ -131,7 +141,7 @@ function App() {
           <PanelHeading eyebrow="Narration" title="Script blocks" />
           <div className="block-list">
             {project.blocks.map((block, index) => (
-              <button
+              <div
                 key={block.id}
                 className={`block-card ${block.id === activeBlock?.id ? "active" : ""}`}
                 onClick={() => store.setActiveBlock(block.id)}
@@ -141,7 +151,11 @@ function App() {
                 </span>
                 <span className="block-copy">{block.text}</span>
                 <span className={`status-dot ${block.status}`} />
-              </button>
+                <div className="block-order">
+                  <button aria-label="Move block up" disabled={index === 0} onClick={(event) => { event.stopPropagation(); void moveBlock(block.id, -1); }}><ArrowUp size={12} /></button>
+                  <button aria-label="Move block down" disabled={index === project.blocks.length - 1} onClick={(event) => { event.stopPropagation(); void moveBlock(block.id, 1); }}><ArrowDown size={12} /></button>
+                </div>
+              </div>
             ))}
           </div>
           <ScriptImporter
@@ -239,6 +253,9 @@ function App() {
                   </button>
                 )}
               </div>
+              {activeBlock && activeBlock.takes.length > 0 && (
+                <TakeReview project={project} block={activeBlock} onUpdate={store.setProject} setBusy={store.setBusy} setError={store.setError} />
+              )}
             </>
           )}
         </section>
@@ -269,6 +286,7 @@ interface RecordingStatus {
   elapsedUs: number;
   paused: boolean;
   mediaBreak: boolean;
+  inputLevel: number;
 }
 
 function RecordingStudio({
@@ -285,14 +303,28 @@ function RecordingStudio({
   setError: (error: string | null) => void;
 }) {
   const [phase, setPhase] = useState<
-    "ready" | "countdown" | "recording" | "paused"
+    "ready" | "countdown" | "recording" | "paused" | "processing"
   >("ready");
   const [countdown, setCountdown] = useState(3);
   const [cueIndex, setCueIndex] = useState(0);
   const [elapsed, setElapsed] = useState(0);
+  const [promptElapsed, setPromptElapsed] = useState(0);
+  const [promptWpm, setPromptWpm] = useState(150);
   const [startedAt, setStartedAt] = useState(0);
   const [mediaBreak, setMediaBreak] = useState(false);
+  const [devices, setDevices] = useState<string[]>([]);
+  const [deviceName, setDeviceName] = useState("");
+  const [inputLevel, setInputLevel] = useState(0);
   const activeCue = block.tray[cueIndex];
+
+  useEffect(() => {
+    invoke<string[]>("list_input_devices")
+      .then((items) => {
+        setDevices(items);
+        setDeviceName((current) => current || items[0] || "");
+      })
+      .catch((reason) => setError(String(reason)));
+  }, [setError]);
 
   useEffect(() => {
     if (phase !== "recording") return;
@@ -302,6 +334,20 @@ function RecordingStudio({
     );
     return () => window.clearInterval(timer);
   }, [phase, startedAt]);
+
+  useEffect(() => {
+    if (phase !== "recording" || mediaBreak) return;
+    const timer = window.setInterval(() => setPromptElapsed((value) => value + 100), 100);
+    return () => window.clearInterval(timer);
+  }, [phase, mediaBreak]);
+
+  useEffect(() => {
+    if (phase !== "recording" && phase !== "paused") { setInputLevel(0); return; }
+    const timer = window.setInterval(() => {
+      invoke<RecordingStatus>("recording_status").then((status) => setInputLevel(status.inputLevel)).catch(() => setInputLevel(0));
+    }, 120);
+    return () => window.clearInterval(timer);
+  }, [phase]);
 
   useEffect(() => {
     function keydown(event: KeyboardEvent) {
@@ -336,7 +382,7 @@ function RecordingStudio({
       await invoke<RecordingStatus>("start_recording", {
         projectPath: project.path,
         blockId: block.id,
-        deviceName: null,
+        deviceName: deviceName || null,
       });
       await invoke("record_cue", {
         eventType: "activate",
@@ -347,6 +393,7 @@ function RecordingStudio({
         setMediaBreak(true);
       }
       setElapsed(0);
+      setPromptElapsed(0);
       setStartedAt(performance.now());
       setPhase("recording");
     } catch (reason) {
@@ -407,13 +454,23 @@ function RecordingStudio({
 
   async function stop() {
     try {
-      onFinish(await invoke<ProjectSnapshot>("stop_recording"));
+      setPhase("processing");
+      const saved = await invoke<ProjectSnapshot>("stop_recording");
+      try {
+        await invoke("align_block", { projectPath: project.path, blockId: block.id });
+        onFinish(await invoke<ProjectSnapshot>("open_project", { projectPath: project.path }));
+      } catch (reason) {
+        setError(`Take saved, but automatic caption alignment needs attention: ${String(reason)}`);
+        onFinish(saved);
+      }
     } catch (reason) {
       setError(String(reason));
     }
   }
 
   const time = `${String(Math.floor(elapsed / 60000)).padStart(2, "0")}:${String(Math.floor(elapsed / 1000) % 60).padStart(2, "0")}.${String(Math.floor(elapsed / 100) % 10)}`;
+  const expectedMs = Math.max(4_000, block.text.split(/\s+/).length * (60_000 / promptWpm));
+  const promptProgress = phase === "ready" ? 0 : Math.min(100, (promptElapsed / expectedMs) * 100);
   return (
     <div className="recording-studio">
       <div className="recording-head">
@@ -427,16 +484,15 @@ function RecordingStudio({
         <span className={`live-state ${phase}`}>
           <i /> {phase === "ready" ? "Ready" : phase}
         </span>
+        <div className="input-meter" title="Microphone input level"><span style={{ width: `${Math.min(100, inputLevel * 180)}%` }} /></div>
         <span className="record-time">{time}</span>
       </div>
       <div className="recording-body">
         <section className={`teleprompter ${mediaBreak ? "holding" : ""}`}>
-          <span className="eyebrow">
-            Teleprompter · Block {block.position + 1}
-          </span>
+          <div className="teleprompter-head"><span className="eyebrow">Teleprompter · Block {block.position + 1}</span><label>{promptWpm} WPM<input type="range" min="90" max="220" step="5" value={promptWpm} onChange={(event) => setPromptWpm(Number(event.target.value))} /></label></div>
           <p>{block.text}</p>
           <div className="prompter-progress">
-            <span style={{ width: phase === "ready" ? "0%" : "18%" }} />
+            <span style={{ width: `${promptProgress}%` }} />
           </div>
         </section>
         <section
@@ -458,6 +514,9 @@ function RecordingStudio({
               <Pause size={30} />
               <span>Recording paused</span>
             </div>
+          )}
+          {phase === "processing" && (
+            <div className="paused-cover"><Sparkles size={30} /><span>Mastering audio and aligning exact-script captions…</span></div>
           )}
         </section>
       </div>
@@ -483,10 +542,19 @@ function RecordingStudio({
           <span>Previous</span>
         </button>
         {phase === "ready" ? (
-          <button className="control begin" onClick={begin}>
-            <Mic2 size={20} />
-            <span>Begin take</span>
-          </button>
+          <div className="begin-group">
+            <label>
+              <Mic2 size={15} />
+              <select value={deviceName} onChange={(event) => setDeviceName(event.target.value)} aria-label="Microphone">
+                {!devices.length && <option value="">Default microphone</option>}
+                {devices.map((device) => <option key={device} value={device}>{device}</option>)}
+              </select>
+            </label>
+            <button className="control begin" onClick={begin}>
+              <Mic2 size={20} />
+              <span>Begin take</span>
+            </button>
+          </div>
         ) : (
           <>
             <button
@@ -558,6 +626,13 @@ function ProjectHome({
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
   const [aspect, setAspect] = useState<"9:16" | "16:9">("9:16");
+  const recent = useMemo(() => JSON.parse(localStorage.getItem("cheeza.recent") ?? "[]") as Array<{ name: string; path: string; aspectRatio: string }>, []);
+  async function openPath(projectPath: string) {
+    setBusy(true); setError(null);
+    try { onOpen(await invoke<ProjectSnapshot>("open_project", { projectPath })); }
+    catch (reason) { setError(String(reason)); }
+    finally { setBusy(false); }
+  }
   async function chooseAndCreate() {
     if (!name.trim()) return;
     const parentPath = await open({
@@ -608,9 +683,6 @@ function ProjectHome({
         <div className="wordmark">
           <span>C</span> Cheeza
         </div>
-        <button className="quiet-button">
-          <Settings2 size={17} /> Preferences
-        </button>
       </nav>
       <section className="home-content">
         <div className="home-intro">
@@ -638,6 +710,12 @@ function ProjectHome({
         </div>
         <WorkflowPreview />
       </section>
+      {recent.length > 0 && (
+        <section className="recent-projects">
+          <span className="eyebrow">Recent projects</span>
+          <div>{recent.map((item) => <button key={item.path} onClick={() => openPath(item.path)}><FolderOpen size={16} /><span><strong>{item.name}</strong><small>{item.aspectRatio} · {item.path}</small></span><ChevronRight size={15} /></button>)}</div>
+        </section>
+      )}
       <footer className="home-footer">
         <span>Local-first · Offline-ready</span>
         <span>Built for focused creators</span>
@@ -750,9 +828,6 @@ function PanelHeading({ eyebrow, title }: { eyebrow: string; title: string }) {
         <span className="eyebrow">{eyebrow}</span>
         <h2>{title}</h2>
       </div>
-      <button className="icon-button compact">
-        <MoreHorizontal size={17} />
-      </button>
     </div>
   );
 }
@@ -792,6 +867,12 @@ function ScriptImporter({ project, onUpdate, setBusy, setError }: AsyncProps) {
       setBusy(false);
     }
   }
+  async function importText() {
+    const path = await open({ multiple: false, filters: [{ name: "Plain-text script", extensions: ["txt"] }], title: "Import script" });
+    if (!path) return;
+    try { setScript(await invoke<string>("read_script_file", { path })); }
+    catch (reason) { setError(String(reason)); }
+  }
   if (!editing)
     return (
       <button className="import-script" onClick={() => setEditing(true)}>
@@ -800,6 +881,7 @@ function ScriptImporter({ project, onUpdate, setBusy, setError }: AsyncProps) {
     );
   return (
     <div className="script-editor">
+      <button className="script-file-button" onClick={importText}><Upload size={14} /> Import .txt</button>
       <textarea
         value={script}
         onChange={(event) => setScript(event.target.value)}
@@ -939,6 +1021,16 @@ function Tray({
               <option value="narrate_over">Voice over</option>
               <option value="play_solo">Play solo</option>
             </select>
+            {project.assets.find((asset) => asset.id === item.assetId)?.durationUs && (
+              <div className="trim-fields" title="Trim range in seconds">
+                <label>In <input type="number" min="0" step="0.1" value={(item.inPointUs / 1_000_000).toFixed(1)} onChange={(event) => mutate("update_tray_item", { item: { ...item, inPointUs: Math.round(Number(event.target.value) * 1_000_000) } })} /></label>
+                <label>Out <input type="number" min="0.1" step="0.1" placeholder="End" value={item.outPointUs == null ? "" : (item.outPointUs / 1_000_000).toFixed(1)} onChange={(event) => mutate("update_tray_item", { item: { ...item, outPointUs: event.target.value ? Math.round(Number(event.target.value) * 1_000_000) : null } })} /></label>
+              </div>
+            )}
+            <div className="tray-order">
+              <button aria-label="Move cue left" disabled={index === 0} onClick={() => mutate("move_tray_item", { trayItemId: item.id, direction: -1 })}><ArrowLeft size={12} /></button>
+              <button aria-label="Move cue right" disabled={index === block.tray.length - 1} onClick={() => mutate("move_tray_item", { trayItemId: item.id, direction: 1 })}><ChevronRight size={12} /></button>
+            </div>
             <button
               onClick={() =>
                 mutate("remove_tray_item", { trayItemId: item.id })
@@ -967,6 +1059,35 @@ function Tray({
         </div>
       </div>
     </div>
+  );
+}
+
+function TakeReview({ project, block, onUpdate, setBusy, setError }: AsyncProps & { block: ProjectSnapshot["blocks"][number] }) {
+  async function selectTake(takeId: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      onUpdate(await invoke<ProjectSnapshot>("select_take", { projectPath: project.path, takeId }));
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <section className="take-review">
+      <div><strong>Saved takes</strong><span>Retakes are non-destructive. Choose the take used in export.</span></div>
+      <div className="take-list">
+        {block.takes.map((take, index) => (
+          <label key={take.id} className={take.selected ? "selected" : ""}>
+            <input type="radio" checked={take.selected} onChange={() => selectTake(take.id)} />
+            <span>Take {block.takes.length - index}</span>
+            <audio controls preload="metadata" src={convertFileSrc(`${project.path}/${take.processedRelativePath ?? take.relativePath}`)} />
+            <small>{(take.durationUs / 1_000_000).toFixed(1)}s</small>
+          </label>
+        ))}
+      </div>
+    </section>
   );
 }
 

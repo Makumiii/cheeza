@@ -15,6 +15,15 @@ export interface ScriptBlock {
   status: "prepared" | "recorded" | "reviewed";
   alignmentStale: boolean;
   tray: TrayItem[];
+  takes: Take[];
+}
+export interface Take {
+  id: string;
+  relativePath: string;
+  processedRelativePath: string | null;
+  durationUs: number;
+  selected: boolean;
+  createdAt: string;
 }
 export interface MediaAsset {
   id: string;

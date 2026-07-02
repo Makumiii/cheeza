@@ -8,7 +8,7 @@ use std::{
     io::BufWriter,
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
         Arc,
     },
     time::{Duration, Instant},
@@ -16,6 +16,12 @@ use std::{
 use uuid::Uuid;
 
 type SharedWriter = Arc<Mutex<Option<WavWriter<BufWriter<File>>>>>;
+#[derive(Clone)]
+struct CaptureControl {
+    active: Arc<AtomicBool>,
+    write_silence: Arc<AtomicBool>,
+    peak: Arc<AtomicU32>,
+}
 pub struct RecordingState(pub Mutex<Option<Recorder>>);
 impl Default for RecordingState {
     fn default() -> Self {
@@ -34,6 +40,7 @@ pub struct Recorder {
     media_break: bool,
     active: Arc<AtomicBool>,
     write_silence: Arc<AtomicBool>,
+    peak: Arc<AtomicU32>,
     writer: SharedWriter,
     stream: cpal::Stream,
     pub events: Vec<PresentationEvent>,
@@ -53,6 +60,7 @@ pub struct RecordingStatus {
     pub elapsed_us: i64,
     pub paused: bool,
     pub media_break: bool,
+    pub input_level: f32,
 }
 
 pub fn input_devices() -> Result<Vec<String>> {
@@ -103,14 +111,19 @@ pub fn start(project_path: &str, block_id: &str, device_name: Option<&str>) -> R
     let writer = Arc::new(Mutex::new(Some(writer)));
     let active = Arc::new(AtomicBool::new(true));
     let write_silence = Arc::new(AtomicBool::new(false));
+    let peak = Arc::new(AtomicU32::new(0));
+    let control = CaptureControl {
+        active: active.clone(),
+        write_silence: write_silence.clone(),
+        peak: peak.clone(),
+    };
     let channels = usize::from(config.channels);
     let stream = match sample_format {
         cpal::SampleFormat::F32 => build_stream(
             &device,
             &config,
             writer.clone(),
-            active.clone(),
-            write_silence.clone(),
+            control.clone(),
             channels,
             |value: f32| (value.clamp(-1.0, 1.0) * i16::MAX as f32) as i16,
         )?,
@@ -118,8 +131,7 @@ pub fn start(project_path: &str, block_id: &str, device_name: Option<&str>) -> R
             &device,
             &config,
             writer.clone(),
-            active.clone(),
-            write_silence.clone(),
+            control.clone(),
             channels,
             |value: i16| value,
         )?,
@@ -127,8 +139,7 @@ pub fn start(project_path: &str, block_id: &str, device_name: Option<&str>) -> R
             &device,
             &config,
             writer.clone(),
-            active.clone(),
-            write_silence.clone(),
+            control,
             channels,
             |value: u16| (value as i32 - 32_768) as i16,
         )?,
@@ -146,6 +157,7 @@ pub fn start(project_path: &str, block_id: &str, device_name: Option<&str>) -> R
         media_break: false,
         active,
         write_silence,
+        peak,
         writer,
         stream,
         events: Vec::new(),
@@ -156,8 +168,7 @@ fn build_stream<T, F>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
     writer: SharedWriter,
-    active: Arc<AtomicBool>,
-    write_silence: Arc<AtomicBool>,
+    control: CaptureControl,
     channels: usize,
     convert: F,
 ) -> Result<cpal::Stream>
@@ -168,26 +179,32 @@ where
     Ok(device.build_input_stream(
         config,
         move |samples: &[T], _| {
-            if !active.load(Ordering::Relaxed) && !write_silence.load(Ordering::Relaxed) {
+            if !control.active.load(Ordering::Relaxed)
+                && !control.write_silence.load(Ordering::Relaxed)
+            {
                 return;
             }
             let mut guard = writer.lock();
             let Some(writer) = guard.as_mut() else { return };
+            let mut callback_peak = 0_u32;
             for frame in samples.chunks(channels) {
-                let mono = if write_silence.load(Ordering::Relaxed) {
+                let mono = if control.write_silence.load(Ordering::Relaxed) {
                     0
                 } else {
-                    (frame
+                    let sample = (frame
                         .iter()
                         .map(|sample| i64::from(convert(*sample)))
                         .sum::<i64>()
-                        / frame.len() as i64) as i16
+                        / frame.len() as i64) as i16;
+                    callback_peak = callback_peak.max(u32::from(sample.unsigned_abs()));
+                    sample
                 };
                 if let Err(error) = writer.write_sample(mono) {
                     log::error!("failed writing recording sample: {error}");
                     break;
                 }
             }
+            control.peak.store(callback_peak, Ordering::Relaxed);
         },
         |error| log::error!("microphone stream error: {error}"),
         None,
@@ -209,6 +226,11 @@ impl Recorder {
             elapsed_us: self.elapsed_us(),
             paused: self.paused_at.is_some(),
             media_break: self.media_break,
+            input_level: if self.paused_at.is_some() || self.media_break {
+                0.0
+            } else {
+                self.peak.load(Ordering::Relaxed) as f32 / i16::MAX as f32
+            },
         }
     }
     pub fn pause(&mut self) {

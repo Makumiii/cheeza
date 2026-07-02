@@ -26,6 +26,7 @@ struct Cue {
     media_type: String,
     start_us: i64,
     in_point_us: i64,
+    out_point_us: Option<i64>,
     playback_mode: String,
 }
 
@@ -121,7 +122,7 @@ fn load_blocks(db: &Connection, root: &Path) -> Result<Vec<BlockRender>> {
     let mut blocks = Vec::new();
     for row in rows {
         let (audio, duration_us, take_id, text) = row?;
-        let mut cues_query = db.prepare("SELECT a.relative_path,a.media_type,e.project_time_us,ti.in_point_us,ti.playback_mode FROM presentation_events e JOIN tray_items ti ON ti.id=e.tray_item_id JOIN media_assets a ON a.id=ti.asset_id WHERE e.take_id=?1 AND e.event_type='activate' ORDER BY e.project_time_us")?;
+        let mut cues_query = db.prepare("SELECT a.relative_path,a.media_type,e.project_time_us,ti.in_point_us,ti.out_point_us,ti.playback_mode FROM presentation_events e JOIN tray_items ti ON ti.id=e.tray_item_id JOIN media_assets a ON a.id=ti.asset_id WHERE e.take_id=?1 AND e.event_type='activate' ORDER BY e.project_time_us")?;
         let cues = cues_query
             .query_map(params![take_id], |row| {
                 Ok(Cue {
@@ -129,7 +130,8 @@ fn load_blocks(db: &Connection, root: &Path) -> Result<Vec<BlockRender>> {
                     media_type: row.get(1)?,
                     start_us: row.get(2)?,
                     in_point_us: row.get(3)?,
-                    playback_mode: row.get(4)?,
+                    out_point_us: row.get(4)?,
+                    playback_mode: row.get(5)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -211,10 +213,15 @@ fn render_block(
                 .cues
                 .get(cue_index + 1)
                 .map_or(block.duration_us, |next| next.start_us);
+            let source_duration = cue
+                .out_point_us
+                .map(|out| (out - cue.in_point_us).max(40_000))
+                .unwrap_or(end - cue.start_us)
+                .min(end - cue.start_us);
             filters.push(format!(
                 "[{}:a]atrim=0:{:.6},asetpts=PTS-STARTPTS,adelay={}|{}[solo{}]",
                 solo_index + 2,
-                (end - cue.start_us) as f64 / 1_000_000.0,
+                source_duration as f64 / 1_000_000.0,
                 cue.start_us / 1_000,
                 cue.start_us / 1_000,
                 solo_index
@@ -257,7 +264,16 @@ fn render_block(
 fn render_cue(cue: &Cue, duration_us: i64, dimensions: &str, output: &Path) -> Result<()> {
     let duration = format!("{:.6}", duration_us as f64 / 1_000_000.0);
     let seek = format!("{:.6}", cue.in_point_us as f64 / 1_000_000.0);
-    let filter = format!("scale={dimensions}:force_original_aspect_ratio=increase,crop={dimensions},setsar=1,fps=30,format=yuv420p");
+    let base_filter = format!("scale={dimensions}:force_original_aspect_ratio=increase,crop={dimensions},setsar=1,fps=30,format=yuv420p");
+    let filter = if cue.media_type == "video" {
+        let available = cue
+            .out_point_us
+            .map(|out| (out - cue.in_point_us).max(40_000))
+            .unwrap_or(duration_us);
+        format!("trim=duration={:.6},setpts=PTS-STARTPTS,{base_filter},tpad=stop_mode=clone:stop_duration={:.6}", available as f64 / 1_000_000.0, duration_us as f64 / 1_000_000.0)
+    } else {
+        base_filter
+    };
     let mut command = crate::tools::command("ffmpeg");
     command.arg("-y");
     if cue.media_type == "image" {

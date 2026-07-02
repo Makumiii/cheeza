@@ -24,6 +24,18 @@ fn save_script(project_path: String, script: String) -> Result<ProjectSnapshot, 
     project::save_script(&project_path, &script).map_err(|error| error.to_string())
 }
 #[tauri::command]
+fn read_script_file(path: String) -> Result<String, String> {
+    let file = std::path::Path::new(&path);
+    if file
+        .extension()
+        .and_then(|value| value.to_str())
+        .map_or(true, |value| !value.eq_ignore_ascii_case("txt"))
+    {
+        return Err("Choose a plain-text .txt script".into());
+    }
+    std::fs::read_to_string(file).map_err(|error| format!("Could not read script: {error}"))
+}
+#[tauri::command]
 fn update_block(project_path: String, block: UpdateBlockInput) -> Result<ProjectSnapshot, String> {
     project::update_block(&project_path, block).map_err(|error| error.to_string())
 }
@@ -52,6 +64,27 @@ fn update_tray_item(
     item: UpdateTrayItemInput,
 ) -> Result<ProjectSnapshot, String> {
     project::update_tray_item(&project_path, item).map_err(|error| error.to_string())
+}
+#[tauri::command]
+fn move_tray_item(
+    project_path: String,
+    tray_item_id: String,
+    direction: i64,
+) -> Result<ProjectSnapshot, String> {
+    project::move_tray_item(&project_path, &tray_item_id, direction)
+        .map_err(|error| error.to_string())
+}
+#[tauri::command]
+fn move_block(
+    project_path: String,
+    block_id: String,
+    direction: i64,
+) -> Result<ProjectSnapshot, String> {
+    project::move_block(&project_path, &block_id, direction).map_err(|error| error.to_string())
+}
+#[tauri::command]
+fn select_take(project_path: String, take_id: String) -> Result<ProjectSnapshot, String> {
+    project::select_take(&project_path, &take_id).map_err(|error| error.to_string())
 }
 #[tauri::command]
 fn list_input_devices() -> Result<Vec<String>, String> {
@@ -90,6 +123,11 @@ fn resume_recording(state: tauri::State<'_, RecordingState>) -> Result<Recording
     let recording = current.as_mut().ok_or("No recording is active")?;
     recording.resume();
     Ok(recording.status())
+}
+#[tauri::command]
+fn recording_status(state: tauri::State<'_, RecordingState>) -> Result<RecordingStatus, String> {
+    let current = state.0.lock();
+    Ok(current.as_ref().ok_or("No recording is active")?.status())
 }
 
 #[tauri::command]
@@ -159,15 +197,20 @@ pub fn run() {
             create_project,
             open_project,
             save_script,
+            read_script_file,
             update_block,
             import_media,
             add_tray_item,
             remove_tray_item,
             update_tray_item,
+            move_tray_item,
+            move_block,
+            select_take,
             list_input_devices,
             start_recording,
             pause_recording,
             resume_recording,
+            recording_status,
             record_cue,
             start_media_break,
             end_media_break,

@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::models::{
-    CreateProjectInput, MediaAsset, ProjectSnapshot, ScriptBlock, TrayItem, UpdateBlockInput,
+    CreateProjectInput, MediaAsset, ProjectSnapshot, ScriptBlock, Take, TrayItem, UpdateBlockInput,
     UpdateTrayItemInput,
 };
 
@@ -167,19 +167,45 @@ pub fn save_script(project_path: &str, script: &str) -> Result<ProjectSnapshot> 
     let root = project_root(project_path)?;
     let mut connection = connect(&root)?;
     let transaction = connection.transaction()?;
-    let count: i64 =
-        transaction.query_row("SELECT COUNT(*) FROM script_blocks", [], |row| row.get(0))?;
+    let mut block_query =
+        transaction.prepare("SELECT id,text FROM script_blocks ORDER BY position")?;
+    let existing = block_query
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(block_query);
+    let paragraphs = paragraphs(script);
     transaction.execute(
         "UPDATE project SET script = ?1, updated_at = ?2",
         params![script, Utc::now().to_rfc3339()],
     )?;
 
-    if count == 0 {
-        for (position, paragraph) in paragraphs(script).into_iter().enumerate() {
+    for (position, paragraph) in paragraphs.iter().enumerate() {
+        if let Some((id, old_text)) = existing.get(position) {
+            if old_text != paragraph {
+                transaction.execute(
+                    "UPDATE script_blocks SET text=?1,alignment_stale=1 WHERE id=?2",
+                    params![paragraph, id],
+                )?;
+            }
+        } else {
             transaction.execute(
                 "INSERT INTO script_blocks (id, position, text) VALUES (?1, ?2, ?3)",
                 params![Uuid::new_v4().to_string(), position as i64, paragraph],
             )?;
+        }
+    }
+    if paragraphs.len() < existing.len() {
+        for (id, _) in existing.iter().skip(paragraphs.len()) {
+            let used: i64 = transaction.query_row(
+                "SELECT (SELECT COUNT(*) FROM takes WHERE block_id=?1) + (SELECT COUNT(*) FROM tray_items WHERE block_id=?1)",
+                params![id], |row| row.get(0),
+            )?;
+            if used > 0 {
+                bail!("Remove the media and takes from trailing blocks before deleting them from the script");
+            }
+            transaction.execute("DELETE FROM script_blocks WHERE id=?1", params![id])?;
         }
     }
     transaction.commit()?;
@@ -275,6 +301,113 @@ pub fn remove_tray_item(project_path: &str, tray_item_id: &str) -> Result<Projec
     snapshot(&root, &connection)
 }
 
+pub fn move_tray_item(
+    project_path: &str,
+    tray_item_id: &str,
+    direction: i64,
+) -> Result<ProjectSnapshot> {
+    let root = project_root(project_path)?;
+    let mut connection = connect(&root)?;
+    let transaction = connection.transaction()?;
+    let (block_id, position): (String, i64) = transaction
+        .query_row(
+            "SELECT block_id, position FROM tray_items WHERE id=?1",
+            params![tray_item_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .context("Tray item was not found")?;
+    let target = position + direction.signum();
+    if target >= 0 {
+        if let Some(other_id) = transaction
+            .query_row(
+                "SELECT id FROM tray_items WHERE block_id=?1 AND position=?2",
+                params![block_id, target],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        {
+            transaction.execute(
+                "UPDATE tray_items SET position=-1 WHERE id=?1",
+                params![tray_item_id],
+            )?;
+            transaction.execute(
+                "UPDATE tray_items SET position=?1 WHERE id=?2",
+                params![position, other_id],
+            )?;
+            transaction.execute(
+                "UPDATE tray_items SET position=?1 WHERE id=?2",
+                params![target, tray_item_id],
+            )?;
+        }
+    }
+    transaction.commit()?;
+    snapshot(&root, &connection)
+}
+
+pub fn move_block(project_path: &str, block_id: &str, direction: i64) -> Result<ProjectSnapshot> {
+    let root = project_root(project_path)?;
+    let mut connection = connect(&root)?;
+    let transaction = connection.transaction()?;
+    let position: i64 = transaction
+        .query_row(
+            "SELECT position FROM script_blocks WHERE id=?1",
+            params![block_id],
+            |row| row.get(0),
+        )
+        .context("Block was not found")?;
+    let target = position + direction.signum();
+    if target >= 0 {
+        if let Some(other_id) = transaction
+            .query_row(
+                "SELECT id FROM script_blocks WHERE position=?1",
+                params![target],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        {
+            transaction.execute(
+                "UPDATE script_blocks SET position=-1 WHERE id=?1",
+                params![block_id],
+            )?;
+            transaction.execute(
+                "UPDATE script_blocks SET position=?1 WHERE id=?2",
+                params![position, other_id],
+            )?;
+            transaction.execute(
+                "UPDATE script_blocks SET position=?1 WHERE id=?2",
+                params![target, block_id],
+            )?;
+            rebuild_script(&transaction)?;
+        }
+    }
+    transaction.commit()?;
+    snapshot(&root, &connection)
+}
+
+pub fn select_take(project_path: &str, take_id: &str) -> Result<ProjectSnapshot> {
+    let root = project_root(project_path)?;
+    let mut connection = connect(&root)?;
+    let transaction = connection.transaction()?;
+    let block_id: String = transaction
+        .query_row(
+            "SELECT block_id FROM takes WHERE id=?1",
+            params![take_id],
+            |row| row.get(0),
+        )
+        .context("Take was not found")?;
+    transaction.execute(
+        "UPDATE takes SET selected=0 WHERE block_id=?1",
+        params![block_id],
+    )?;
+    transaction.execute("UPDATE takes SET selected=1 WHERE id=?1", params![take_id])?;
+    transaction.execute(
+        "UPDATE script_blocks SET alignment_stale=1 WHERE id=?1",
+        params![block_id],
+    )?;
+    transaction.commit()?;
+    snapshot(&root, &connection)
+}
+
 pub fn update_tray_item(project_path: &str, item: UpdateTrayItemInput) -> Result<ProjectSnapshot> {
     if !matches!(item.playback_mode.as_str(), "narrate_over" | "play_solo") {
         bail!("Unsupported playback mode");
@@ -362,6 +495,7 @@ fn snapshot(root: &Path, connection: &Connection) -> Result<ProjectSnapshot> {
             let id: String = row.get(0)?;
             Ok(ScriptBlock {
                 tray: load_tray(connection, &id)?,
+                takes: load_takes(connection, &id)?,
                 id,
                 position: row.get(1)?,
                 text: row.get(2)?,
@@ -381,6 +515,23 @@ fn snapshot(root: &Path, connection: &Connection) -> Result<ProjectSnapshot> {
         blocks,
         assets,
     })
+}
+
+fn load_takes(connection: &Connection, block_id: &str) -> rusqlite::Result<Vec<Take>> {
+    let mut statement = connection.prepare("SELECT id,relative_path,processed_relative_path,duration_us,selected,created_at FROM takes WHERE block_id=?1 ORDER BY created_at DESC")?;
+    let takes = statement
+        .query_map(params![block_id], |row| {
+            Ok(Take {
+                id: row.get(0)?,
+                relative_path: row.get(1)?,
+                processed_relative_path: row.get(2)?,
+                duration_us: row.get(3)?,
+                selected: row.get::<_, i64>(4)? != 0,
+                created_at: row.get(5)?,
+            })
+        })?
+        .collect();
+    takes
 }
 
 fn load_tray(connection: &Connection, block_id: &str) -> rusqlite::Result<Vec<TrayItem>> {
@@ -474,7 +625,8 @@ fn unique_asset_name(hash: &str, name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{media_type, paragraphs, safe_folder_name};
+    use super::{create, media_type, move_block, paragraphs, safe_folder_name, save_script};
+    use crate::models::CreateProjectInput;
 
     #[test]
     fn splits_paragraphs_without_empty_blocks() {
@@ -494,5 +646,33 @@ mod tests {
         assert_eq!(media_type("mp4"), Some("video"));
         assert_eq!(media_type("png"), Some("image"));
         assert_eq!(media_type("exe"), None);
+    }
+
+    #[test]
+    fn script_edits_reconcile_and_blocks_reorder() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = create(CreateProjectInput {
+            parent_path: temp.path().to_string_lossy().into_owned(),
+            name: "Script test".into(),
+            aspect_ratio: "9:16".into(),
+            platform_target: "TikTok".into(),
+        })
+        .unwrap();
+        let project = save_script(&project.path, "First block.\n\nSecond block.").unwrap();
+        let first_id = project.blocks[0].id.clone();
+        let project = save_script(
+            &project.path,
+            "Edited first block.\n\nSecond block.\n\nThird block.",
+        )
+        .unwrap();
+        assert_eq!(project.blocks.len(), 3);
+        assert_eq!(project.blocks[0].id, first_id);
+        assert!(project.blocks[0].alignment_stale);
+        let project = move_block(&project.path, &first_id, 1).unwrap();
+        assert_eq!(project.blocks[1].id, first_id);
+        assert_eq!(
+            project.script,
+            "Second block.\n\nEdited first block.\n\nThird block."
+        );
     }
 }

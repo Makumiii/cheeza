@@ -47,6 +47,18 @@ pub struct ScriptBlock {
     pub status: String,
     pub alignment_stale: bool,
     pub tray: Vec<TrayItem>,
+    pub takes: Vec<Take>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Take {
+    pub id: String,
+    pub relative_path: String,
+    pub processed_relative_path: Option<String>,
+    pub duration_us: i64,
+    pub selected: bool,
+    pub created_at: String,
 }
 
 #[derive(Debug, Serialize)]
