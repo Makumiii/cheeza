@@ -1,6 +1,6 @@
 [package]
 name = "cheeza"
-version = "0.1.1"
+version = "0.1.2"
 description = "Script-driven narration and visual presentation studio"
 authors = ["Cheeza Contributors"]
 license = "AGPL-3.0-only"

@@ -3,8 +3,9 @@
 Updated: 2026-07-02 (Africa/Nairobi)  
 Repository: `git@github.com:Makumiii/cheeza.git`  
 Branch: `main`  
-Latest implementation commit: `2089b69`
-Handoff/workflow cleanup commit: `82e98b0`
+Latest implementation commit: `c620057`
+Release preparation base: `a8a0d86`
+Current release tag: `v0.1.2`
 
 ## Product
 
@@ -57,30 +58,41 @@ Projects are portable folders containing `cheeza.sqlite`, originals, proxies, th
 - H.264 video, AAC 48 kHz audio, `faststart`, 1080x1920 or 1920x1080 MP4.
 - Custom Cheeza desktop icon and dark/orange desktop UI.
 - Bundled Windows offline toolchain; packaged speech-worker health check runs before installer build.
+- Persisted production settings for background music, automatic ducking, opening cards, caption presets, and cut/dissolve transitions.
+- Full-project 360p preview, final JPEG thumbnail sidecar, and public tagged-release publishing.
+- Safe block editor with split-at-cursor and merge-next actions.
+- Play-once/loop controls for video and GIF occurrences.
+- Guided two-second microphone sound check with quiet/hot/silent feedback.
+- Interrupted-take metadata and automatic FFmpeg repair on project reopen.
+- Project trash actions for unused media and old takes; source files are moved rather than permanently deleted.
+- Alignment confidence and recognized transcript context in take review.
 
-Validation completed locally on `2089b69`:
+Validation completed locally for the `v0.1.2` source tree:
 
-- `cargo test`: 7 passed, 1 ignored end-to-end test.
+- `cargo test`: 8 passed, 1 ignored end-to-end test.
 - Strict `cargo clippy --all-targets -- -D warnings`: passed.
 - `npm run build`: passed.
 - `npm run lint`: passed.
-- Ignored real FFmpeg fixture test: passed; verifies H.264, AAC, 1080x1920, and exact-script SRT.
+- Ignored real FFmpeg fixture test: passed; repairs an interrupted take and verifies dialogue enhancement, opening card, dissolve, ducked music, styled exact-script captions, H.264/AAC 1080x1920 export, thumbnail sidecar, and 360x640 project preview.
 - Real faster-whisper synthetic-speech test was run earlier and returned aligned transcript/timestamps.
-- Linux `.deb` built at `app/src-tauri/target/release/bundle/deb/Cheeza_0.1.0_amd64.deb`.
+- Linux `.deb` output: `app/src-tauri/target/release/bundle/deb/Cheeza_0.1.2_amd64.deb`.
 - `.deb` metadata and dynamic libraries validated; packaged GUI survived a timed launch under WSL (only expected EGL/Mesa warnings).
-- Linux package SHA-256: `53c7e43fb0a3a1e84e56a5c3cdcf9624eb51cec9063af14928dc351f719ba69a`.
+- Linux package SHA-256: `58cc6fd2867041b43e48e7e92074a819de43df914fa6a1e357e6ac1619852859`.
 
 Remote validation:
 
 - Cross-platform CI for `2089b69`: success, run `28582626479`.
 - Windows release for `e0ac745`: success; produced a 580,893,134-byte `Cheeza-Windows` artifact, run `28581473442`.
 - Windows release for `44db9dd`: success, run `28582154732`.
-- Final Windows release for `2089b69`: run `28582626451`; it was still in progress when this document was written. Monitor until success and confirm `Cheeza-Windows` artifact exists.
+- Windows release for `2089b69`: success, run `28582626451`.
+- `v0.1.0` Windows release for `c620057`: run `28584671576`.
+- `v0.1.1` Windows release for `a8a0d86`: run `28584791777`.
+- Final public `v0.1.2` Windows release includes the packaged-dialog capability correction. Its workflow creates the GitHub Release and uploads the NSIS installer.
 
 ## Immediate remaining release work
 
-1. Wait for Windows release run `28582626451` to finish and confirm success/artifact.
-2. Inspect artifact metadata/size. GitHub's artifact ZIP endpoint requires authenticated access; the public Actions page still exposes run status.
+1. Confirm the `v0.1.2` Windows release finishes and publishes both the Actions artifact and public GitHub Release installer.
+2. Inspect final installer metadata/size and preserve its checksum in this document.
 3. On an actual Windows machine, install the final NSIS artifact and manually test:
    - create/open project;
    - `.txt` import;
@@ -90,22 +102,15 @@ Remote validation:
    - automatic caption alignment without Python or FFmpeg installed system-wide;
    - 9:16 and 16:9 exports and SRT sidecars;
    - reopening the portable project.
-4. Confirm normal CI for the handoff/workflow-cleanup commit. The temporary Windows `main` push trigger has already been removed; `workflow_dispatch` and `v*` tag triggers remain.
+4. Confirm cross-platform CI for `a8a0d86`. Windows releases now run only for manual dispatch or `v*` tags.
 
 ## Product gaps beyond the completed core workflow
 
 These were discussed or appeared in the broader plan but are not implemented. Treat them as follow-up scope, not as already working:
 
-- Project-wide background music, automatic ducking, and music controls.
-- Opening thumbnail/title card and thumbnail sidecar export.
-- Named caption style/brand presets and editable caption mismatch UI.
 - True live voice-following teleprompter. Current live prompter is WPM-paced and holds during media breaks; accurate speech alignment happens after the take.
-- Full-project low-resolution preview. The top-right action performs the production export.
-- Visual dissolves or configurable transitions. Current visuals use deterministic cuts; narration blocks receive short anti-click fades.
 - Standalone source-audio cues paired with required visuals.
-- Dedicated GIF play-once/loop controls.
-- Split/merge buttons for individual blocks. Users currently adjust paragraph boundaries in the source-script editor.
-- Trash/undo UI, explicit crash-recovery UI for orphan raw files, and updater/signing infrastructure.
+- Undo/restore-from-trash UI and updater/signing infrastructure.
 - An automated Windows GUI test harness. Core logic and packaging are automated; actual microphone/WebView interaction still needs Windows manual QA.
 
 Do not silently claim these follow-up items are complete. Discuss prioritization with the user before expanding scope.
