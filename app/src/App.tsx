@@ -71,7 +71,9 @@ function App() {
     store.setError(null);
     setNotice(null);
     try {
-      const result = await invoke<{ path: string }>("export_project", { projectPath });
+      const result = await invoke<{ path: string }>("export_project", {
+        projectPath,
+      });
       setNotice(`Export ready: ${result.path}`);
     } catch (reason) {
       store.setError(String(reason));
@@ -81,9 +83,20 @@ function App() {
   }
   async function alignActiveBlock() {
     if (!activeBlock) return;
-    store.setBusy(true); store.setError(null); setNotice(null);
-    try { await invoke("align_block", { projectPath, blockId: activeBlock.id }); store.setProject(await invoke<ProjectSnapshot>("open_project", { projectPath })); setNotice("Captions aligned to the accepted narration take."); }
-    catch (reason) { store.setError(String(reason)); } finally { store.setBusy(false); }
+    store.setBusy(true);
+    store.setError(null);
+    setNotice(null);
+    try {
+      await invoke("align_block", { projectPath, blockId: activeBlock.id });
+      store.setProject(
+        await invoke<ProjectSnapshot>("open_project", { projectPath }),
+      );
+      setNotice("Captions aligned to the accepted narration take.");
+    } catch (reason) {
+      store.setError(String(reason));
+    } finally {
+      store.setBusy(false);
+    }
   }
   return (
     <main className="app-shell">
@@ -196,7 +209,7 @@ function App() {
                   setError={store.setError}
                 />
               )}
-        <div className="record-ready">
+              <div className="record-ready">
                 <div className="record-copy">
                   <span className="record-icon">
                     <Mic2 size={18} />
@@ -213,6 +226,18 @@ function App() {
                 >
                   <span /> Start recording
                 </button>
+                {activeBlock?.status === "recorded" && (
+                  <button
+                    className="align-button"
+                    onClick={alignActiveBlock}
+                    disabled={busy}
+                  >
+                    <Sparkles size={15} />{" "}
+                    {activeBlock.alignmentStale
+                      ? "Align captions"
+                      : "Captions aligned"}
+                  </button>
+                )}
               </div>
             </>
           )}
@@ -228,7 +253,12 @@ function App() {
       {error && (
         <ErrorToast error={error} dismiss={() => store.setError(null)} />
       )}
-      {notice && <div className="success-toast"><span>{notice}</span><button onClick={() => setNotice(null)}>Dismiss</button></div>}
+      {notice && (
+        <div className="success-toast">
+          <span>{notice}</span>
+          <button onClick={() => setNotice(null)}>Dismiss</button>
+        </div>
+      )}
     </main>
   );
 }
@@ -334,8 +364,14 @@ function RecordingStudio({
         trayItemId: block.tray[index].id,
       });
       const solo = block.tray[index].playbackMode === "play_solo";
-      if (solo && !mediaBreak) { await invoke("start_media_break"); setMediaBreak(true); }
-      if (!solo && mediaBreak) { await invoke("end_media_break"); setMediaBreak(false); }
+      if (solo && !mediaBreak) {
+        await invoke("start_media_break");
+        setMediaBreak(true);
+      }
+      if (!solo && mediaBreak) {
+        await invoke("end_media_break");
+        setMediaBreak(false);
+      }
       setCueIndex(index);
     } catch (reason) {
       setError(String(reason));
@@ -360,7 +396,9 @@ function RecordingStudio({
   async function toggleMediaBreak() {
     if (phase !== "recording") return;
     try {
-      await invoke<RecordingStatus>(mediaBreak ? "end_media_break" : "start_media_break");
+      await invoke<RecordingStatus>(
+        mediaBreak ? "end_media_break" : "start_media_break",
+      );
       setMediaBreak(!mediaBreak);
     } catch (reason) {
       setError(String(reason));
@@ -405,7 +443,12 @@ function RecordingStudio({
           className={`live-canvas ${project.aspectRatio === "9:16" ? "vertical" : ""}`}
         >
           {activeCue && (
-            <AssetPreview project={project} assetId={activeCue.assetId} playing={phase === "recording"} withAudio={activeCue.playbackMode === "play_solo"} />
+            <AssetPreview
+              project={project}
+              assetId={activeCue.assetId}
+              playing={phase === "recording"}
+              withAudio={activeCue.playbackMode === "play_solo"}
+            />
           )}
           {phase === "countdown" && (
             <div className="countdown">{countdown}</div>
@@ -481,9 +524,8 @@ function RecordingStudio({
         >
           <SkipForward size={18} />
           <span>Next</span>
-          </button>
-          {activeBlock?.status === "recorded" && <button className="align-button" onClick={alignActiveBlock} disabled={busy}><Sparkles size={15} /> {activeBlock.alignmentStale ? "Align captions" : "Captions aligned"}</button>}
-        </div>
+        </button>
+      </div>
       <div className="record-shortcuts">
         <span>
           <kbd>Space</kbd> Pause
@@ -880,7 +922,20 @@ function Tray({
           <div className="tray-card" key={item.id}>
             <span className="cue-number">{index + 1}</span>
             <AssetPreview project={project} assetId={item.assetId} />
-            <select className="playback-select" value={item.playbackMode} onChange={(event) => mutate("update_tray_item", { item: { id: item.id, playbackMode: event.target.value, inPointUs: item.inPointUs, outPointUs: item.outPointUs } })}>
+            <select
+              className="playback-select"
+              value={item.playbackMode}
+              onChange={(event) =>
+                mutate("update_tray_item", {
+                  item: {
+                    id: item.id,
+                    playbackMode: event.target.value,
+                    inPointUs: item.inPointUs,
+                    outPointUs: item.outPointUs,
+                  },
+                })
+              }
+            >
               <option value="narrate_over">Voice over</option>
               <option value="play_solo">Play solo</option>
             </select>
@@ -928,8 +983,20 @@ function AssetPreview({
 }) {
   const asset = project.assets.find((item) => item.id === assetId);
   if (!asset) return null;
-  const source = convertFileSrc(`${project.path}/${asset.relativePath}`);
-  if (asset.mediaType === "video") return <video key={`${assetId}-${playing}`} src={source} muted={!withAudio} autoPlay={playing} />;
+  const sourcePath =
+    playing && asset.proxyRelativePath
+      ? asset.proxyRelativePath
+      : asset.relativePath;
+  const source = convertFileSrc(`${project.path}/${sourcePath}`);
+  if (asset.mediaType === "video")
+    return (
+      <video
+        key={`${assetId}-${playing}`}
+        src={source}
+        muted={!withAudio}
+        autoPlay={playing}
+      />
+    );
   if (asset.mediaType === "audio")
     return (
       <div className="audio-preview">

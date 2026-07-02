@@ -1,5 +1,6 @@
 mod audio;
 mod captions;
+mod media;
 mod models;
 mod project;
 mod recorder;

@@ -57,6 +57,11 @@ pub struct MediaAsset {
     pub relative_path: String,
     pub media_type: String,
     pub content_hash: String,
+    pub duration_us: Option<i64>,
+    pub width: Option<i64>,
+    pub height: Option<i64>,
+    pub proxy_relative_path: Option<String>,
+    pub thumbnail_relative_path: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

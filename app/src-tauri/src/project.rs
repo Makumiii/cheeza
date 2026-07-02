@@ -39,9 +39,13 @@ CREATE TABLE IF NOT EXISTS media_assets (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
   relative_path TEXT NOT NULL UNIQUE,
-  processed_relative_path TEXT,
   media_type TEXT NOT NULL,
   content_hash TEXT NOT NULL,
+  duration_us INTEGER,
+  width INTEGER,
+  height INTEGER,
+  proxy_relative_path TEXT,
+  thumbnail_relative_path TEXT,
   created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS tray_items (
@@ -211,6 +215,17 @@ pub fn import_media(project_path: &str, source_paths: &[String]) -> Result<Proje
             .to_ascii_lowercase();
         let media_type = media_type(&extension).context("Unsupported media format")?;
         let hash = hash_file(source)?;
+        if connection
+            .query_row(
+                "SELECT 1 FROM media_assets WHERE content_hash=?1",
+                params![hash],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .is_some()
+        {
+            continue;
+        }
         let name = source
             .file_name()
             .and_then(|value| value.to_str())
@@ -221,10 +236,12 @@ pub fn import_media(project_path: &str, source_paths: &[String]) -> Result<Proje
         if !destination.exists() {
             fs::copy(source, &destination)?;
         }
+        let asset_id = Uuid::new_v4().to_string();
+        let prepared = crate::media::prepare(&root, &asset_id, &relative_path, media_type)?;
         connection.execute(
-      "INSERT OR IGNORE INTO media_assets (id, name, relative_path, media_type, content_hash, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-      params![Uuid::new_v4().to_string(), name, relative_path, media_type, hash, Utc::now().to_rfc3339()],
-    )?;
+          "INSERT OR IGNORE INTO media_assets (id,name,relative_path,media_type,content_hash,duration_us,width,height,proxy_relative_path,thumbnail_relative_path,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+          params![asset_id,name,relative_path,media_type,hash,prepared.duration_us,prepared.width,prepared.height,prepared.proxy_relative_path,prepared.thumbnail_relative_path,Utc::now().to_rfc3339()],
+        )?;
     }
     snapshot(&root, &connection)
 }
@@ -289,6 +306,15 @@ fn connect(root: &Path) -> Result<Connection> {
         "ALTER TABLE takes ADD COLUMN processed_relative_path TEXT",
         [],
     );
+    for migration in [
+        "ALTER TABLE media_assets ADD COLUMN duration_us INTEGER",
+        "ALTER TABLE media_assets ADD COLUMN width INTEGER",
+        "ALTER TABLE media_assets ADD COLUMN height INTEGER",
+        "ALTER TABLE media_assets ADD COLUMN proxy_relative_path TEXT",
+        "ALTER TABLE media_assets ADD COLUMN thumbnail_relative_path TEXT",
+    ] {
+        let _ = connection.execute(migration, []);
+    }
     Ok(connection)
 }
 
@@ -310,7 +336,7 @@ fn snapshot(root: &Path, connection: &Connection) -> Result<ProjectSnapshot> {
         .optional()?
         .context("This folder does not contain a Cheeza project")?;
 
-    let mut asset_statement = connection.prepare("SELECT id, name, relative_path, media_type, content_hash FROM media_assets ORDER BY created_at")?;
+    let mut asset_statement = connection.prepare("SELECT id,name,relative_path,media_type,content_hash,duration_us,width,height,proxy_relative_path,thumbnail_relative_path FROM media_assets ORDER BY created_at")?;
     let assets = asset_statement
         .query_map([], |row| {
             Ok(MediaAsset {
@@ -319,6 +345,11 @@ fn snapshot(root: &Path, connection: &Connection) -> Result<ProjectSnapshot> {
                 relative_path: row.get(2)?,
                 media_type: row.get(3)?,
                 content_hash: row.get(4)?,
+                duration_us: row.get(5)?,
+                width: row.get(6)?,
+                height: row.get(7)?,
+                proxy_relative_path: row.get(8)?,
+                thumbnail_relative_path: row.get(9)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
