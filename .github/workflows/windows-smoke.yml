@@ -1,0 +1,54 @@
+name: Windows installed release smoke test
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/windows-smoke.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download public installer
+        run: |
+          Invoke-WebRequest https://github.com/Makumiii/cheeza/releases/download/v0.1.2/Cheeza_0.1.2_x64-setup.exe -OutFile $env:RUNNER_TEMP/Cheeza-setup.exe
+          $size = (Get-Item $env:RUNNER_TEMP/Cheeza-setup.exe).Length
+          if ($size -lt 500MB) { throw "Installer is unexpectedly small: $size bytes" }
+      - name: Install silently
+        run: |
+          $process = Start-Process $env:RUNNER_TEMP/Cheeza-setup.exe -ArgumentList '/S' -PassThru -Wait
+          if ($process.ExitCode -ne 0) { throw "Installer exited with $($process.ExitCode)" }
+      - name: Validate installed offline toolchain
+        run: |
+          $app = Get-ChildItem $env:LOCALAPPDATA -Recurse -Filter cheeza.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $app) { throw "Installed Cheeza executable was not found" }
+          $root = $app.Directory.FullName
+          $ffmpeg = Join-Path $root 'resources/bin/ffmpeg.exe'
+          $ffprobe = Join-Path $root 'resources/bin/ffprobe.exe'
+          $worker = Join-Path $root 'resources/bin/speech-worker.exe'
+          $model = Join-Path $root 'resources/models/small.en/model.bin'
+          foreach ($path in @($ffmpeg, $ffprobe, $worker, $model)) {
+            if (-not (Test-Path $path)) { throw "Bundled release resource missing: $path" }
+          }
+          & $ffmpeg -version | Select-Object -First 1
+          & $ffprobe -version | Select-Object -First 1
+          $health = & $worker --health
+          if ($LASTEXITCODE -ne 0 -or $health -notmatch '"ok": true') { throw "Speech worker health check failed: $health" }
+          "CHEEZA_EXE=$($app.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Launch installed application
+        run: |
+          $app = Start-Process $env:CHEEZA_EXE -PassThru
+          Start-Sleep -Seconds 8
+          $app.Refresh()
+          if ($app.HasExited) { throw "Installed Cheeza exited during launch smoke test with $($app.ExitCode)" }
+          Stop-Process -Id $app.Id -Force

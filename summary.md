@@ -77,7 +77,7 @@ Validation completed locally for the `v0.1.2` source tree:
 - Real faster-whisper synthetic-speech test was run earlier and returned aligned transcript/timestamps.
 - Linux `.deb` output: `app/src-tauri/target/release/bundle/deb/Cheeza_0.1.2_amd64.deb`.
 - `.deb` metadata and dynamic libraries validated; packaged GUI survived a timed launch under WSL (only expected EGL/Mesa warnings).
-- Linux package SHA-256: `58cc6fd2867041b43e48e7e92074a819de43df914fa6a1e357e6ac1619852859`.
+- Linux package SHA-256: `fddbfc598a0331fe8b8482631f665b1df34470e554edf654dc835a8564b8266d`.
 
 Remote validation:
 
@@ -87,12 +87,12 @@ Remote validation:
 - Windows release for `2089b69`: success, run `28582626451`.
 - `v0.1.0` Windows release for `c620057`: run `28584671576`.
 - `v0.1.1` Windows release for `a8a0d86`: run `28584791777`.
-- Final public `v0.1.2` Windows release includes the packaged-dialog capability correction. Its workflow creates the GitHub Release and uploads the NSIS installer.
+- Final public `v0.1.2` Windows release includes the packaged-dialog capability correction. Run `28585673211` succeeded and published `Cheeza_0.1.2_x64-setup.exe` (580,805,829 bytes).
 
 ## Immediate remaining release work
 
-1. Confirm the `v0.1.2` Windows release finishes and publishes both the Actions artifact and public GitHub Release installer.
-2. Inspect final installer metadata/size and preserve its checksum in this document.
+1. Confirm `.github/workflows/windows-smoke.yml` succeeds. It installs the public `v0.1.2` NSIS package, validates bundled tools/model, health-checks the speech worker, and launch-smokes the installed GUI.
+2. The public installer size is 580,805,829 bytes. A complete local checksum download was abandoned because the sandbox transfer was throttled; GitHub Actions artifact/release upload integrity and the installed-release smoke test are the authoritative gates.
 3. On an actual Windows machine, install the final NSIS artifact and manually test:
    - create/open project;
    - `.txt` import;
