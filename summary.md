@@ -4,6 +4,7 @@ Updated: 2026-07-02 (Africa/Nairobi)
 Repository: `git@github.com:Makumiii/cheeza.git`  
 Branch: `main`  
 Latest implementation commit: `2089b69`
+Handoff/workflow cleanup commit: `82e98b0`
 
 ## Product
 
@@ -89,8 +90,7 @@ Remote validation:
    - automatic caption alignment without Python or FFmpeg installed system-wide;
    - 9:16 and 16:9 exports and SRT sidecars;
    - reopening the portable project.
-4. After the final Windows run is proven, remove the temporary `push.branches: [main]` trigger from `windows-release.yml`; retain `workflow_dispatch` and `v*` tag triggers. This avoids rebuilding a ~581 MB installer on every push.
-5. Commit/push this handoff and any workflow cleanup. Re-run normal CI.
+4. Confirm normal CI for the handoff/workflow-cleanup commit. The temporary Windows `main` push trigger has already been removed; `workflow_dispatch` and `v*` tag triggers remain.
 
 ## Product gaps beyond the completed core workflow
 
