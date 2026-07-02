@@ -15,6 +15,7 @@ pub struct ExportResult {
     pub duration_us: i64,
 }
 struct BlockRender {
+    text: String,
     audio: PathBuf,
     duration_us: i64,
     cues: Vec<Cue>,
@@ -56,12 +57,34 @@ pub fn export(project_path: &str) -> Result<ExportResult> {
     for (index, block) in blocks.iter().enumerate() {
         rendered.push(render_block(block, &work, index, dimensions)?);
     }
+    let assembled = work.join("assembled.mp4");
+    concat(&rendered, &work.join("blocks.txt"), &assembled, true)?;
+    let caption_path = root.join("captions/captions.srt");
+    let mut offset_us = 0;
+    let captions = blocks
+        .iter()
+        .map(|block| {
+            let item = crate::captions::CaptionBlock {
+                text: &block.text,
+                offset_us,
+                duration_us: block.duration_us,
+            };
+            offset_us += block.duration_us;
+            item
+        })
+        .collect::<Vec<_>>();
+    crate::captions::write_srt(&caption_path, &captions)?;
     let output = root.join("exports").join(format!(
         "{}-{aspect}-{}.mp4",
         safe_name(&name),
         Utc::now().format("%Y%m%d-%H%M%S")
     ));
-    concat(&rendered, &work.join("blocks.txt"), &output, true)?;
+    let subtitle = caption_path
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace(':', "\\:")
+        .replace('\'', "\\'");
+    run(Command::new("ffmpeg").args(["-y", "-i"]).arg(&assembled).args(["-vf", &format!("subtitles='{subtitle}':force_style='FontName=Arial,FontSize=18,PrimaryColour=&H00FFFFFF,OutlineColour=&H00101010,Outline=3,Shadow=0,Alignment=2,MarginV=110'"), "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-c:a", "copy", "-movflags", "+faststart"]).arg(&output))?;
     Ok(ExportResult {
         path: output.to_string_lossy().into_owned(),
         duration_us: blocks.iter().map(|block| block.duration_us).sum(),
@@ -69,17 +92,18 @@ pub fn export(project_path: &str) -> Result<ExportResult> {
 }
 
 fn load_blocks(db: &Connection, root: &Path) -> Result<Vec<BlockRender>> {
-    let mut statement = db.prepare("SELECT t.relative_path, t.duration_us, t.id FROM script_blocks b JOIN takes t ON t.block_id=b.id AND t.selected=1 ORDER BY b.position")?;
+    let mut statement = db.prepare("SELECT COALESCE(t.processed_relative_path,t.relative_path),t.duration_us,t.id,b.text FROM script_blocks b JOIN takes t ON t.block_id=b.id AND t.selected=1 ORDER BY b.position")?;
     let rows = statement.query_map([], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, i64>(1)?,
             row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
         ))
     })?;
     let mut blocks = Vec::new();
     for row in rows {
-        let (audio, duration_us, take_id) = row?;
+        let (audio, duration_us, take_id, text) = row?;
         let mut cues_query = db.prepare("SELECT a.relative_path,a.media_type,e.project_time_us,ti.in_point_us FROM presentation_events e JOIN tray_items ti ON ti.id=e.tray_item_id JOIN media_assets a ON a.id=ti.asset_id WHERE e.take_id=?1 AND e.event_type='activate' ORDER BY e.project_time_us")?;
         let cues = cues_query
             .query_map(params![take_id], |row| {
@@ -92,6 +116,7 @@ fn load_blocks(db: &Connection, root: &Path) -> Result<Vec<BlockRender>> {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         blocks.push(BlockRender {
+            text,
             audio: root.join(audio),
             duration_us,
             cues,
@@ -176,7 +201,7 @@ fn concat(files: &[PathBuf], list_path: &Path, output: &Path, audio: bool) -> Re
         list_path,
         files
             .iter()
-            .map(|path| format!("file '{}\n", path.to_string_lossy().replace('\'', "'\\''")))
+            .map(|path| format!("file '{}'\n", path.to_string_lossy().replace('\'', "'\\''")))
             .collect::<String>(),
     )?;
     let mut command = Command::new("ffmpeg");

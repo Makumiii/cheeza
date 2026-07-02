@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS media_assets (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
   relative_path TEXT NOT NULL UNIQUE,
+  processed_relative_path TEXT,
   media_type TEXT NOT NULL,
   content_hash TEXT NOT NULL,
   created_at TEXT NOT NULL
@@ -71,6 +72,11 @@ CREATE INDEX IF NOT EXISTS idx_tray_block_position ON tray_items(block_id, posit
 "#;
 
 pub fn save_recording(recording: crate::recorder::FinishedRecording) -> Result<ProjectSnapshot> {
+    let processed_relative_path = format!("recordings/processed/{}.wav", recording.take_id);
+    crate::audio::enhance_dialogue(
+        &recording.project_path.join(&recording.relative_path),
+        &recording.project_path.join(&processed_relative_path),
+    )?;
     let mut connection = connect(&recording.project_path)?;
     let transaction = connection.transaction()?;
     transaction.execute(
@@ -78,8 +84,8 @@ pub fn save_recording(recording: crate::recorder::FinishedRecording) -> Result<P
         params![recording.block_id],
     )?;
     transaction.execute(
-        "INSERT INTO takes (id, block_id, relative_path, duration_us, selected, created_at) VALUES (?1, ?2, ?3, ?4, 1, ?5)",
-        params![recording.take_id, recording.block_id, recording.relative_path, recording.duration_us, Utc::now().to_rfc3339()],
+        "INSERT INTO takes (id, block_id, relative_path, processed_relative_path, duration_us, selected, created_at) VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6)",
+        params![recording.take_id, recording.block_id, recording.relative_path, processed_relative_path, recording.duration_us, Utc::now().to_rfc3339()],
     )?;
     for event in recording.events {
         transaction.execute(
@@ -241,6 +247,10 @@ pub fn remove_tray_item(project_path: &str, tray_item_id: &str) -> Result<Projec
 fn connect(root: &Path) -> Result<Connection> {
     let connection = Connection::open(root.join(DB_NAME))?;
     connection.execute_batch(SCHEMA)?;
+    let _ = connection.execute(
+        "ALTER TABLE takes ADD COLUMN processed_relative_path TEXT",
+        [],
+    );
     Ok(connection)
 }
 
