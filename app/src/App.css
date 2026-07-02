@@ -931,6 +931,8 @@ button {
 .recording-body { min-height: 0; flex: 1; display: grid; grid-template-columns: .8fr 1.2fr; gap: 22px; padding: 22px; }
 .teleprompter { border: 1px solid var(--line); border-radius: 10px; padding: 27px; background: linear-gradient(145deg,#13110f,#0e0d0b); display: flex; flex-direction: column; }
 .teleprompter p { margin: auto 0; font-size: clamp(20px,2.2vw,31px); line-height: 1.52; letter-spacing: -.025em; color: #e5e0d8; }
+.teleprompter.holding p { opacity: .28; }
+.teleprompter.holding::after { content: "MEDIA BREAK · NARRATION HELD"; color: var(--orange); font-size: 9px; letter-spacing: .12em; margin-top: 12px; }
 .prompter-progress { height: 3px; border-radius: 3px; background: #29251f; overflow: hidden; }
 .prompter-progress span { height: 100%; display: block; background: var(--orange); transition: width .2s var(--ease-out); }
 .live-canvas { position: relative; place-self: center; width: 100%; max-height: 100%; aspect-ratio: 16/9; border: 1px solid rgba(255,255,255,.12); border-radius: 9px; overflow: hidden; background: #171410; box-shadow: 0 20px 60px rgba(0,0,0,.5); }

@@ -31,6 +31,7 @@ pub struct Recorder {
     started_at: Instant,
     paused_total: Duration,
     paused_at: Option<Instant>,
+    media_break: bool,
     active: Arc<AtomicBool>,
     writer: SharedWriter,
     stream: cpal::Stream,
@@ -50,6 +51,7 @@ pub struct RecordingStatus {
     pub block_id: String,
     pub elapsed_us: i64,
     pub paused: bool,
+    pub media_break: bool,
 }
 
 pub fn input_devices() -> Result<Vec<String>> {
@@ -136,6 +138,7 @@ pub fn start(project_path: &str, block_id: &str, device_name: Option<&str>) -> R
         started_at: Instant::now(),
         paused_total: Duration::ZERO,
         paused_at: None,
+        media_break: false,
         active,
         writer,
         stream,
@@ -194,6 +197,7 @@ impl Recorder {
             block_id: self.block_id.clone(),
             elapsed_us: self.elapsed_us(),
             paused: self.paused_at.is_some(),
+            media_break: self.media_break,
         }
     }
     pub fn pause(&mut self) {
@@ -205,7 +209,7 @@ impl Recorder {
     pub fn resume(&mut self) {
         if let Some(paused_at) = self.paused_at.take() {
             self.paused_total += paused_at.elapsed();
-            self.active.store(true, Ordering::Relaxed);
+            self.active.store(!self.media_break, Ordering::Relaxed);
         }
     }
     pub fn cue(&mut self, event_type: &str, tray_item_id: Option<String>) {
@@ -214,6 +218,21 @@ impl Recorder {
             project_time_us: self.elapsed_us(),
             tray_item_id,
         });
+    }
+    pub fn start_media_break(&mut self) {
+        if !self.media_break && self.paused_at.is_none() {
+            self.media_break = true;
+            self.active.store(false, Ordering::Relaxed);
+            self.cue("media_break_start", None);
+        }
+    }
+    pub fn end_media_break(&mut self) {
+        if self.media_break {
+            self.media_break = false;
+            self.active
+                .store(self.paused_at.is_none(), Ordering::Relaxed);
+            self.cue("media_break_end", None);
+        }
     }
     pub fn finish(mut self) -> Result<FinishedRecording> {
         self.pause();

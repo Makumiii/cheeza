@@ -232,6 +232,7 @@ interface RecordingStatus {
   blockId: string;
   elapsedUs: number;
   paused: boolean;
+  mediaBreak: boolean;
 }
 
 function RecordingStudio({
@@ -254,6 +255,7 @@ function RecordingStudio({
   const [cueIndex, setCueIndex] = useState(0);
   const [elapsed, setElapsed] = useState(0);
   const [startedAt, setStartedAt] = useState(0);
+  const [mediaBreak, setMediaBreak] = useState(false);
   const activeCue = block.tray[cueIndex];
 
   useEffect(() => {
@@ -342,6 +344,16 @@ function RecordingStudio({
     }
   }
 
+  async function toggleMediaBreak() {
+    if (phase !== "recording") return;
+    try {
+      await invoke<RecordingStatus>(mediaBreak ? "end_media_break" : "start_media_break");
+      setMediaBreak(!mediaBreak);
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
   async function stop() {
     try {
       onFinish(await invoke<ProjectSnapshot>("stop_recording"));
@@ -367,7 +379,7 @@ function RecordingStudio({
         <span className="record-time">{time}</span>
       </div>
       <div className="recording-body">
-        <section className="teleprompter">
+        <section className={`teleprompter ${mediaBreak ? "holding" : ""}`}>
           <span className="eyebrow">
             Teleprompter · Block {block.position + 1}
           </span>
@@ -380,7 +392,7 @@ function RecordingStudio({
           className={`live-canvas ${project.aspectRatio === "9:16" ? "vertical" : ""}`}
         >
           {activeCue && (
-            <AssetPreview project={project} assetId={activeCue.assetId} />
+            <AssetPreview project={project} assetId={activeCue.assetId} playing={phase === "recording"} />
           )}
           {phase === "countdown" && (
             <div className="countdown">{countdown}</div>
@@ -431,11 +443,11 @@ function RecordingStudio({
             </button>
             <button
               className="control media-break"
-              onClick={togglePause}
-              disabled={phase === "countdown"}
+              onClick={toggleMediaBreak}
+              disabled={phase !== "recording"}
             >
               <VolumeX size={18} />
-              <span>Media break</span>
+              <span>{mediaBreak ? "Resume narration" : "Media break"}</span>
             </button>
             <button
               className="control stop"
@@ -888,14 +900,16 @@ function Tray({
 function AssetPreview({
   project,
   assetId,
+  playing = false,
 }: {
   project: ProjectSnapshot;
   assetId: string;
+  playing?: boolean;
 }) {
   const asset = project.assets.find((item) => item.id === assetId);
   if (!asset) return null;
   const source = convertFileSrc(`${project.path}/${asset.relativePath}`);
-  if (asset.mediaType === "video") return <video src={source} muted />;
+  if (asset.mediaType === "video") return <video key={`${assetId}-${playing}`} src={source} muted autoPlay={playing} />;
   if (asset.mediaType === "audio")
     return (
       <div className="audio-preview">

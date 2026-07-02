@@ -95,6 +95,22 @@ fn record_cue(
 }
 
 #[tauri::command]
+fn start_media_break(state: tauri::State<'_, RecordingState>) -> Result<RecordingStatus, String> {
+    let mut current = state.0.lock();
+    let recording = current.as_mut().ok_or("No recording is active")?;
+    recording.start_media_break();
+    Ok(recording.status())
+}
+
+#[tauri::command]
+fn end_media_break(state: tauri::State<'_, RecordingState>) -> Result<RecordingStatus, String> {
+    let mut current = state.0.lock();
+    let recording = current.as_mut().ok_or("No recording is active")?;
+    recording.end_media_break();
+    Ok(recording.status())
+}
+
+#[tauri::command]
 fn stop_recording(state: tauri::State<'_, RecordingState>) -> Result<ProjectSnapshot, String> {
     let recording = state.0.lock().take().ok_or("No recording is active")?;
     recording
@@ -137,6 +153,8 @@ pub fn run() {
             pause_recording,
             resume_recording,
             record_cue,
+            start_media_break,
+            end_media_break,
             stop_recording,
             export_project
         ])
