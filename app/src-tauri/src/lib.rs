@@ -5,6 +5,7 @@ mod models;
 mod project;
 mod recorder;
 mod render;
+mod scope_access;
 mod speech;
 mod tools;
 
@@ -15,11 +16,17 @@ use models::{
 use recorder::{RecordingState, RecordingStatus};
 
 #[tauri::command]
-fn create_project(input: CreateProjectInput) -> Result<ProjectSnapshot, String> {
-    project::create(input).map_err(|error| error.to_string())
+fn create_project(
+    app: tauri::AppHandle,
+    input: CreateProjectInput,
+) -> Result<ProjectSnapshot, String> {
+    let snapshot = project::create(input).map_err(|error| error.to_string())?;
+    scope_access::allow_project_media(&app, &snapshot.path)?;
+    Ok(snapshot)
 }
 #[tauri::command]
-fn open_project(project_path: String) -> Result<ProjectSnapshot, String> {
+fn open_project(app: tauri::AppHandle, project_path: String) -> Result<ProjectSnapshot, String> {
+    scope_access::allow_project_media(&app, &project_path)?;
     project::open(&project_path).map_err(|error| error.to_string())
 }
 #[tauri::command]
@@ -51,10 +58,15 @@ fn update_project_settings(
 }
 #[tauri::command]
 fn import_media(
+    app: tauri::AppHandle,
     project_path: String,
     source_paths: Vec<String>,
 ) -> Result<ProjectSnapshot, String> {
-    project::import_media(&project_path, &source_paths).map_err(|error| error.to_string())
+    scope_access::allow_project_media(&app, &project_path)?;
+    let snapshot =
+        project::import_media(&project_path, &source_paths).map_err(|error| error.to_string())?;
+    scope_access::allow_project_media(&app, &snapshot.path)?;
+    Ok(snapshot)
 }
 #[tauri::command]
 fn add_tray_item(
@@ -198,26 +210,48 @@ fn end_media_break(state: tauri::State<'_, RecordingState>) -> Result<RecordingS
 }
 
 #[tauri::command]
-fn stop_recording(state: tauri::State<'_, RecordingState>) -> Result<ProjectSnapshot, String> {
+fn stop_recording(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, RecordingState>,
+) -> Result<ProjectSnapshot, String> {
     let recording = state.0.lock().take().ok_or("No recording is active")?;
-    recording
+    let snapshot = recording
         .finish()
         .and_then(project::save_recording)
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    scope_access::allow_project_media(&app, &snapshot.path)?;
+    Ok(snapshot)
 }
 
 #[tauri::command]
-fn export_project(project_path: String) -> Result<render::ExportResult, String> {
-    render::export(&project_path).map_err(|error| error.to_string())
+fn export_project(
+    app: tauri::AppHandle,
+    project_path: String,
+) -> Result<render::ExportResult, String> {
+    scope_access::allow_project_media(&app, &project_path)?;
+    let result = render::export(&project_path).map_err(|error| error.to_string())?;
+    scope_access::allow_media_path(&app, &result.path)?;
+    Ok(result)
 }
 #[tauri::command]
-fn preview_project(project_path: String) -> Result<render::ExportResult, String> {
-    render::preview(&project_path).map_err(|error| error.to_string())
+fn preview_project(
+    app: tauri::AppHandle,
+    project_path: String,
+) -> Result<render::ExportResult, String> {
+    scope_access::allow_project_media(&app, &project_path)?;
+    let result = render::preview(&project_path).map_err(|error| error.to_string())?;
+    scope_access::allow_media_path(&app, &result.path)?;
+    Ok(result)
 }
 
 #[tauri::command]
 fn align_block(project_path: String, block_id: String) -> Result<Vec<speech::AlignedWord>, String> {
     speech::align_block(&project_path, &block_id).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn ensure_project_media_access(app: tauri::AppHandle, project_path: String) -> Result<(), String> {
+    scope_access::allow_project_media(&app, &project_path)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -226,6 +260,7 @@ pub fn run() {
         .manage(RecordingState::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_persisted_scope::init())
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
@@ -266,7 +301,8 @@ pub fn run() {
             stop_recording,
             export_project,
             preview_project,
-            align_block
+            align_block,
+            ensure_project_media_access
         ])
         .run(tauri::generate_context!())
         .expect("error while running Cheeza");

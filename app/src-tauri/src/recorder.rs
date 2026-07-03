@@ -8,7 +8,7 @@ use std::{
     io::BufWriter,
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         Arc,
     },
     time::{Duration, Instant},
@@ -21,6 +21,10 @@ struct CaptureControl {
     active: Arc<AtomicBool>,
     write_silence: Arc<AtomicBool>,
     peak: Arc<AtomicU32>,
+    max_peak: Arc<AtomicU32>,
+    written_samples: Arc<AtomicU64>,
+    started_at: Instant,
+    sample_rate: u32,
 }
 pub struct RecordingState(pub Mutex<Option<Recorder>>);
 impl Default for RecordingState {
@@ -41,6 +45,7 @@ pub struct Recorder {
     active: Arc<AtomicBool>,
     write_silence: Arc<AtomicBool>,
     peak: Arc<AtomicU32>,
+    max_peak: Arc<AtomicU32>,
     writer: SharedWriter,
     stream: cpal::Stream,
     pub events: Vec<PresentationEvent>,
@@ -79,7 +84,12 @@ pub struct SoundCheck {
 }
 
 pub fn input_devices() -> Result<Vec<String>> {
-    let mut names = cpal::default_host()
+    let host = cpal::default_host();
+    let default_name = host
+        .default_input_device()
+        .and_then(|device| device.description().ok())
+        .map(|description| description.name().to_owned());
+    let mut names = host
         .input_devices()?
         .filter_map(|device| {
             device
@@ -90,6 +100,12 @@ pub fn input_devices() -> Result<Vec<String>> {
         .collect::<Vec<_>>();
     names.sort();
     names.dedup();
+    if let Some(default_name) = default_name {
+        if let Some(index) = names.iter().position(|name| name == &default_name) {
+            names.remove(index);
+            names.insert(0, default_name);
+        }
+    }
     Ok(names)
 }
 
@@ -114,10 +130,17 @@ pub fn start(project_path: &str, block_id: &str, device_name: Option<&str>) -> R
     let active = Arc::new(AtomicBool::new(true));
     let write_silence = Arc::new(AtomicBool::new(false));
     let peak = Arc::new(AtomicU32::new(0));
+    let max_peak = Arc::new(AtomicU32::new(0));
+    let written_samples = Arc::new(AtomicU64::new(0));
+    let started_at = Instant::now();
     let control = CaptureControl {
         active: active.clone(),
         write_silence: write_silence.clone(),
         peak: peak.clone(),
+        max_peak: max_peak.clone(),
+        written_samples,
+        started_at,
+        sample_rate: config.sample_rate,
     };
     let channels = usize::from(config.channels);
     let stream = match sample_format {
@@ -163,13 +186,14 @@ pub fn start(project_path: &str, block_id: &str, device_name: Option<&str>) -> R
         project_path,
         block_id: block_id.to_owned(),
         relative_path,
-        started_at: Instant::now(),
+        started_at,
         paused_total: Duration::ZERO,
         paused_at: None,
         media_break: false,
         active,
         write_silence,
         peak,
+        max_peak,
         writer,
         stream,
         events: Vec::new(),
@@ -288,10 +312,21 @@ where
             {
                 return;
             }
+            // Some virtual/null capture devices deliver zero-filled buffers much faster than
+            // real time. Never let device callbacks create more samples than wall-clock capture
+            // time can contain (plus a small hardware-buffer allowance).
+            let maximum_samples =
+                realtime_sample_limit(control.started_at.elapsed(), control.sample_rate);
+            if control.written_samples.load(Ordering::Relaxed) >= maximum_samples {
+                return;
+            }
             let mut guard = writer.lock();
             let Some(writer) = guard.as_mut() else { return };
             let mut callback_peak = 0_u32;
             for frame in samples.chunks(channels) {
+                if control.written_samples.load(Ordering::Relaxed) >= maximum_samples {
+                    break;
+                }
                 let mono = if control.write_silence.load(Ordering::Relaxed) {
                     0
                 } else {
@@ -307,8 +342,10 @@ where
                     log::error!("failed writing recording sample: {error}");
                     break;
                 }
+                control.written_samples.fetch_add(1, Ordering::Relaxed);
             }
             control.peak.store(callback_peak, Ordering::Relaxed);
+            control.max_peak.fetch_max(callback_peak, Ordering::Relaxed);
         },
         |error| log::error!("microphone stream error: {error}"),
         None,
@@ -386,6 +423,18 @@ impl Recorder {
             .take()
             .context("Recording file is already finalized")?
             .finalize()?;
+        if signal_is_silent(self.max_peak.load(Ordering::Relaxed)) {
+            let raw = self.project_path.join(&self.relative_path);
+            let trash = self
+                .project_path
+                .join("trash")
+                .join(format!("{}-silent.wav", self.take_id));
+            let _ = std::fs::rename(raw, trash);
+            let _ = std::fs::remove_file(self.project_path.join("cache/active-recording.json"));
+            bail!(
+                "No microphone signal was captured. Choose a real input device and run Test mic before recording (WSL/ALSA null devices only generate silence)."
+            );
+        }
         Ok(FinishedRecording {
             take_id: self.take_id,
             project_path: self.project_path,
@@ -397,6 +446,14 @@ impl Recorder {
     }
 }
 
+fn realtime_sample_limit(elapsed: Duration, sample_rate: u32) -> u64 {
+    (elapsed.as_secs_f64() * f64::from(sample_rate)) as u64 + u64::from(sample_rate / 10)
+}
+
+fn signal_is_silent(maximum_sample: u32) -> bool {
+    maximum_sample as f32 / (i16::MAX as f32) < 0.001
+}
+
 pub struct FinishedRecording {
     pub take_id: String,
     pub project_path: PathBuf,
@@ -404,4 +461,22 @@ pub struct FinishedRecording {
     pub relative_path: String,
     pub duration_us: i64,
     pub events: Vec<PresentationEvent>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{realtime_sample_limit, signal_is_silent};
+    use std::time::Duration;
+
+    #[test]
+    fn virtual_devices_cannot_outpace_wall_clock() {
+        let limit = realtime_sample_limit(Duration::from_millis(26_500), 44_100);
+        assert!((1_168_000..=1_174_000).contains(&limit));
+    }
+
+    #[test]
+    fn digital_silence_is_rejected_but_speech_peaks_are_kept() {
+        assert!(signal_is_silent(1));
+        assert!(!signal_is_silent(2_000));
+    }
 }

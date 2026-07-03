@@ -1,5 +1,13 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { mediaFileUrl, projectMediaUrl } from "./media";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   ArrowLeft,
@@ -31,6 +39,130 @@ import { useProjectStore } from "./store/project";
 import type { ProjectSnapshot } from "./types";
 import "./App.css";
 
+type WorkspaceMode = "prepare" | "record" | "review";
+type RecordingPhase =
+  | "ready"
+  | "countdown"
+  | "recording"
+  | "paused"
+  | "processing";
+
+function canRecordBlock(block?: ProjectSnapshot["blocks"][number]) {
+  return Boolean(block?.tray.length);
+}
+
+function canReviewBlock(block?: ProjectSnapshot["blocks"][number]) {
+  return Boolean(block?.takes.length);
+}
+
+const WORKSPACE_STEPS: Array<{ id: WorkspaceMode; label: string }> = [
+  { id: "prepare", label: "Prepare" },
+  { id: "record", label: "Record" },
+  { id: "review", label: "Review" },
+];
+
+const WORKSPACE_ORDER: Record<WorkspaceMode, number> = {
+  prepare: 0,
+  record: 1,
+  review: 2,
+};
+
+type StepVisual = "current" | "complete" | "next" | "available" | "locked";
+
+function stepVisual(
+  step: WorkspaceMode,
+  mode: WorkspaceMode,
+  canRecord: boolean,
+  canReview: boolean,
+): StepVisual {
+  if (mode === step) return "current";
+  if (WORKSPACE_ORDER[step] < WORKSPACE_ORDER[mode]) return "complete";
+  if (step === "record" && mode === "prepare" && canRecord) return "next";
+  if (step === "review" && canReview && mode === "prepare") return "available";
+  if (step === "record" && !canRecord) return "locked";
+  if (step === "review" && !canReview) return "locked";
+  return "locked";
+}
+
+function canStepNavigate(
+  target: WorkspaceMode,
+  mode: WorkspaceMode,
+  canRecord: boolean,
+  canReview: boolean,
+  locked: boolean,
+) {
+  if (locked || target === mode) return false;
+  if (target === "prepare") return true;
+  if (target === "review" && canReview) return true;
+  if (target === "record" && mode === "review" && canRecord) return true;
+  return false;
+}
+
+function BlockStepper({
+  mode,
+  onNavigate,
+  canRecord,
+  canReview,
+  locked,
+}: {
+  mode: WorkspaceMode;
+  onNavigate: (mode: WorkspaceMode) => void;
+  canRecord: boolean;
+  canReview: boolean;
+  locked: boolean;
+}) {
+  return (
+    <nav className="stage-stepper" aria-label="Block workflow">
+      {WORKSPACE_STEPS.map((step, index) => {
+        const visual = stepVisual(step.id, mode, canRecord, canReview);
+        const clickable = canStepNavigate(
+          step.id,
+          mode,
+          canRecord,
+          canReview,
+          locked,
+        );
+        const connectorDone =
+          index > 0 &&
+          WORKSPACE_ORDER[WORKSPACE_STEPS[index - 1].id] < WORKSPACE_ORDER[mode];
+        const pill = (
+          <>
+            <span className="stage-step-dot" aria-hidden="true" />
+            <span className="stage-step-label">{step.label}</span>
+          </>
+        );
+        return (
+          <div key={step.id} className="stage-step">
+            {index > 0 && (
+              <span
+                className={`stage-step-connector ${connectorDone ? "complete" : ""}`}
+                aria-hidden="true"
+              />
+            )}
+            {clickable ? (
+              <button
+                type="button"
+                className={`stage-step-pill ${visual}`}
+                aria-current={mode === step.id ? "step" : undefined}
+                onClick={() => onNavigate(step.id)}
+              >
+                {pill}
+              </button>
+            ) : (
+              <span
+                className={`stage-step-pill ${visual}`}
+                aria-current={mode === step.id ? "step" : undefined}
+              >
+                {pill}
+              </span>
+            )}
+          </div>
+        );
+      })}
+    </nav>
+  );
+}
+
 const mediaExtensions = [
   "jpg",
   "jpeg",
@@ -53,11 +185,39 @@ const mediaExtensions = [
 function App() {
   const store = useProjectStore();
   const { project, activeBlockId, busy, error } = store;
-  const [mode, setMode] = useState<"prepare" | "record">("prepare");
+  const [mode, setMode] = useState<WorkspaceMode>("prepare");
+  const [recordingActive, setRecordingActive] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [blockEditorOpen, setBlockEditorOpen] = useState(false);
   const [previewPath, setPreviewPath] = useState<string | null>(null);
+  const previousBlockId = useRef(activeBlockId);
+  const activeBlock = project
+    ? (project.blocks.find((block) => block.id === activeBlockId) ??
+      project.blocks[0])
+    : undefined;
+
+  useEffect(() => {
+    if (!project?.path) return;
+    void invoke("ensure_project_media_access", { projectPath: project.path });
+  }, [project?.path]);
+
+  useEffect(() => {
+    if (mode !== "record") setRecordingActive(false);
+  }, [mode]);
+
+  useEffect(() => {
+    if (!activeBlock) return;
+    if (mode === "review" && !activeBlock.takes.length) setMode("prepare");
+    if (mode === "record" && !activeBlock.tray.length) setMode("prepare");
+  }, [mode, activeBlock]);
+
+  useEffect(() => {
+    if (previousBlockId.current === activeBlockId) return;
+    previousBlockId.current = activeBlockId;
+    setMode("prepare");
+  }, [activeBlockId]);
+
   if (!project)
     return (
       <ProjectHome
@@ -68,10 +228,16 @@ function App() {
         error={error}
       />
     );
-  const activeBlock =
-    project.blocks.find((block) => block.id === activeBlockId) ??
-    project.blocks[0];
   const projectPath = project.path;
+  const blockCanRecord = canRecordBlock(activeBlock);
+  const blockCanReview = canReviewBlock(activeBlock);
+
+  function setWorkspaceMode(next: WorkspaceMode) {
+    if (recordingActive) return;
+    if (next === "record" && !blockCanRecord) return;
+    if (next === "review" && !blockCanReview) return;
+    setMode(next);
+  }
   async function exportVideo() {
     store.setBusy(true);
     store.setError(null);
@@ -136,7 +302,7 @@ function App() {
           className="icon-button"
           onClick={store.reset}
           aria-label="Back to projects"
-          disabled={mode === "record"}
+          disabled={recordingActive}
         >
           <ArrowLeft size={18} />
         </button>
@@ -191,99 +357,131 @@ function App() {
           />
         </aside>
         <section className="stage-panel">
-          {mode === "record" && activeBlock ? (
-            <RecordingStudio
-              project={project}
-              block={activeBlock}
-              onFinish={(updated) => {
-                store.setProject(updated);
-                setMode("prepare");
-              }}
-              onCancel={() => setMode("prepare")}
-              setError={store.setError}
+          <div className="stage-toolbar">
+            <BlockStepper
+              mode={mode}
+              onNavigate={setWorkspaceMode}
+              canRecord={blockCanRecord}
+              canReview={blockCanReview}
+              locked={recordingActive}
             />
-          ) : (
-            <>
-              <div className="stage-toolbar">
-                <div className="stage-tabs">
-                  <button className="active">Prepare</button>
-                  <button disabled>Record</button>
-                  <button disabled>Review</button>
-                </div>
-                <button className="edit-block-button" onClick={() => setBlockEditorOpen(true)} disabled={!activeBlock}><Pencil size={13} /> Edit block</button>
-                <span className="stage-hint">
-                  Block {activeBlock ? activeBlock.position + 1 : 0} of{" "}
-                  {project.blocks.length}
-                </span>
-              </div>
-              <div
-                className={`canvas-wrap ${project.aspectRatio === "9:16" ? "vertical" : "landscape"}`}
-              >
-                <div className="presentation-canvas">
-                  {activeBlock?.tray[0] ? (
-                    <AssetPreview
-                      project={project}
-                      assetId={activeBlock.tray[0].assetId}
-                    />
-                  ) : (
-                    <div className="canvas-empty">
-                      <div className="empty-orbit">
-                        <ImagePlus size={25} />
+            <button
+              className="edit-block-button"
+              onClick={() => setBlockEditorOpen(true)}
+              disabled={!activeBlock || recordingActive}
+            >
+              <Pencil size={13} /> Edit block
+            </button>
+            <span className="stage-hint">
+              Block {activeBlock ? activeBlock.position + 1 : 0} of{" "}
+              {project.blocks.length}
+            </span>
+          </div>
+          <div className="stage-workspace">
+            {mode === "record" && activeBlock ? (
+              <RecordingStudio
+                project={project}
+                block={activeBlock}
+                onFinish={(updated) => {
+                  store.setProject(updated);
+                  setMode("review");
+                }}
+                onCancel={() => setWorkspaceMode("prepare")}
+                onPhaseChange={setRecordingActive}
+                setError={store.setError}
+              />
+            ) : mode === "review" && activeBlock ? (
+              <>
+                <div
+                  className={`canvas-wrap review-canvas ${project.aspectRatio === "9:16" ? "vertical" : "landscape"}`}
+                >
+                  <div className="presentation-canvas">
+                    {activeBlock.tray[0] ? (
+                      <AssetPreview
+                        project={project}
+                        assetId={activeBlock.tray[0].assetId}
+                        variant="stage"
+                      />
+                    ) : (
+                      <div className="canvas-empty">
+                        <strong>No preview</strong>
                       </div>
-                      <strong>Build this block’s visual sequence</strong>
-                      <span>
-                        Add media from the project dock, then arrange it in
-                        presentation order.
-                      </span>
-                    </div>
-                  )}
-                  <div className="safe-zone" />
+                    )}
+                    <div className="safe-zone" />
+                  </div>
                 </div>
-              </div>
-              {activeBlock && (
-                <Tray
+                <TakeReview
                   project={project}
-                  blockId={activeBlock.id}
+                  block={activeBlock}
                   onUpdate={store.setProject}
                   setBusy={store.setBusy}
                   setError={store.setError}
+                  expanded
                 />
-              )}
-              <div className="record-ready">
-                <div className="record-copy">
-                  <span className="record-icon">
-                    <Mic2 size={18} />
-                  </span>
-                  <div>
-                    <strong>Prepare before recording</strong>
-                    <span>Every block needs at least one visual cue.</span>
+                {activeBlock.status === "recorded" && (
+                  <div className="review-actions">
+                    <button
+                      className="align-button"
+                      onClick={alignActiveBlock}
+                      disabled={busy}
+                    >
+                      <Sparkles size={15} />{" "}
+                      {activeBlock.alignmentStale
+                        ? "Align captions"
+                        : "Captions aligned"}
+                    </button>
+                  </div>
+                )}
+              </>
+            ) : (
+              <>
+                <div
+                  className={`canvas-wrap ${project.aspectRatio === "9:16" ? "vertical" : "landscape"}`}
+                >
+                  <div className="presentation-canvas">
+                    {activeBlock?.tray[0] ? (
+                      <AssetPreview
+                        project={project}
+                        assetId={activeBlock.tray[0].assetId}
+                        variant="stage"
+                      />
+                    ) : (
+                      <div className="canvas-empty">
+                        <div className="empty-orbit">
+                          <ImagePlus size={25} />
+                        </div>
+                        <strong>Build this block’s visual sequence</strong>
+                        <span>
+                          Add media from the project dock, then arrange it in
+                          presentation order.
+                        </span>
+                      </div>
+                    )}
+                    <div className="safe-zone" />
                   </div>
                 </div>
-                <button
-                  className="record-button"
-                  disabled={!activeBlock?.tray.length}
-                  onClick={() => setMode("record")}
-                >
-                  <span /> Start recording
-                </button>
-                {activeBlock?.status === "recorded" && (
-                  <button
-                    className="align-button"
-                    onClick={alignActiveBlock}
-                    disabled={busy}
-                  >
-                    <Sparkles size={15} />{" "}
-                    {activeBlock.alignmentStale
-                      ? "Align captions"
-                      : "Captions aligned"}
-                  </button>
+                {activeBlock && (
+                  <Tray
+                    project={project}
+                    blockId={activeBlock.id}
+                    onUpdate={store.setProject}
+                    setBusy={store.setBusy}
+                    setError={store.setError}
+                  />
                 )}
-              </div>
-              {activeBlock && activeBlock.takes.length > 0 && (
-                <TakeReview project={project} block={activeBlock} onUpdate={store.setProject} setBusy={store.setBusy} setError={store.setError} />
-              )}
-            </>
-          )}
+                {blockCanRecord && (
+                  <div className="stage-cta">
+                    <button
+                      className="record-button"
+                      onClick={() => setWorkspaceMode("record")}
+                    >
+                      <span /> Enter recording studio
+                    </button>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
         </section>
         <MediaDock
           project={project}
@@ -326,7 +524,7 @@ function App() {
           <section className="modal preview-modal" onMouseDown={(event) => event.stopPropagation()}>
             <span className="eyebrow">Project preview</span>
             <h2>Review the assembled cut.</h2>
-            <video controls autoPlay src={convertFileSrc(previewPath)} />
+            <video controls autoPlay src={mediaFileUrl(previewPath)} />
             <div className="modal-actions"><button className="secondary-button" onClick={() => setPreviewPath(null)}>Close</button><button className="primary-button" onClick={() => { setPreviewPath(null); void exportVideo(); }}>Export final</button></div>
           </section>
         </div>
@@ -349,17 +547,17 @@ function RecordingStudio({
   block,
   onFinish,
   onCancel,
+  onPhaseChange,
   setError,
 }: {
   project: ProjectSnapshot;
   block: ProjectSnapshot["blocks"][number];
   onFinish: (project: ProjectSnapshot) => void;
   onCancel: () => void;
+  onPhaseChange?: (active: boolean) => void;
   setError: (error: string | null) => void;
 }) {
-  const [phase, setPhase] = useState<
-    "ready" | "countdown" | "recording" | "paused" | "processing"
-  >("ready");
+  const [phase, setPhase] = useState<RecordingPhase>("ready");
   const [countdown, setCountdown] = useState(3);
   const [cueIndex, setCueIndex] = useState(0);
   const [elapsed, setElapsed] = useState(0);
@@ -372,7 +570,28 @@ function RecordingStudio({
   const [inputLevel, setInputLevel] = useState(0);
   const [checkingMic, setCheckingMic] = useState(false);
   const [soundCheck, setSoundCheck] = useState<{ peakLevel: number; verdict: string } | null>(null);
+  const [prompterMaxScroll, setPrompterMaxScroll] = useState(0);
+  const prompterViewportRef = useRef<HTMLDivElement>(null);
+  const prompterTextRef = useRef<HTMLParagraphElement>(null);
   const activeCue = block.tray[cueIndex];
+
+  useEffect(() => {
+    onPhaseChange?.(phase !== "ready");
+  }, [phase, onPhaseChange]);
+
+  useLayoutEffect(() => {
+    const viewport = prompterViewportRef.current;
+    const text = prompterTextRef.current;
+    if (!viewport || !text) return;
+    const measure = () => {
+      setPrompterMaxScroll(Math.max(0, text.scrollHeight - viewport.clientHeight));
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(viewport);
+    observer.observe(text);
+    return () => observer.disconnect();
+  }, [block.text, promptWpm]);
 
   useEffect(() => {
     invoke<string[]>("list_input_devices")
@@ -406,6 +625,47 @@ function RecordingStudio({
     return () => window.clearInterval(timer);
   }, [phase]);
 
+  const activateCue = useCallback(
+    async (index: number) => {
+      if (index === cueIndex || phase === "ready" || phase === "countdown")
+        return;
+      try {
+        await invoke("record_cue", {
+          eventType: "activate",
+          trayItemId: block.tray[index].id,
+        });
+        const solo = block.tray[index].playbackMode === "play_solo";
+        if (solo && !mediaBreak) {
+          await invoke("start_media_break");
+          setMediaBreak(true);
+        }
+        if (!solo && mediaBreak) {
+          await invoke("end_media_break");
+          setMediaBreak(false);
+        }
+        setCueIndex(index);
+      } catch (reason) {
+        setError(String(reason));
+      }
+    },
+    [block, cueIndex, mediaBreak, phase, setError],
+  );
+
+  const togglePause = useCallback(async () => {
+    try {
+      if (phase === "recording") {
+        await invoke("pause_recording");
+        setPhase("paused");
+      } else if (phase === "paused") {
+        await invoke("resume_recording");
+        setStartedAt(performance.now() - elapsed);
+        setPhase("recording");
+      }
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }, [elapsed, phase, setError]);
+
   useEffect(() => {
     function keydown(event: KeyboardEvent) {
       if (event.repeat) return;
@@ -427,7 +687,7 @@ function RecordingStudio({
     }
     window.addEventListener("keydown", keydown);
     return () => window.removeEventListener("keydown", keydown);
-  });
+  }, [activateCue, block.tray.length, cueIndex, phase, togglePause]);
 
   async function begin() {
     setPhase("countdown");
@@ -466,44 +726,6 @@ function RecordingStudio({
     finally { setCheckingMic(false); }
   }
 
-  async function activateCue(index: number) {
-    if (index === cueIndex || phase === "ready" || phase === "countdown")
-      return;
-    try {
-      await invoke("record_cue", {
-        eventType: "activate",
-        trayItemId: block.tray[index].id,
-      });
-      const solo = block.tray[index].playbackMode === "play_solo";
-      if (solo && !mediaBreak) {
-        await invoke("start_media_break");
-        setMediaBreak(true);
-      }
-      if (!solo && mediaBreak) {
-        await invoke("end_media_break");
-        setMediaBreak(false);
-      }
-      setCueIndex(index);
-    } catch (reason) {
-      setError(String(reason));
-    }
-  }
-
-  async function togglePause() {
-    try {
-      if (phase === "recording") {
-        await invoke("pause_recording");
-        setPhase("paused");
-      } else if (phase === "paused") {
-        await invoke("resume_recording");
-        setStartedAt(performance.now() - elapsed);
-        setPhase("recording");
-      }
-    } catch (reason) {
-      setError(String(reason));
-    }
-  }
-
   async function toggleMediaBreak() {
     if (phase !== "recording") return;
     try {
@@ -529,12 +751,21 @@ function RecordingStudio({
       }
     } catch (reason) {
       setError(String(reason));
+      setPhase("ready");
+      setElapsed(0);
+      setPromptElapsed(0);
+      setInputLevel(0);
+      setMediaBreak(false);
     }
   }
 
   const time = `${String(Math.floor(elapsed / 60000)).padStart(2, "0")}:${String(Math.floor(elapsed / 1000) % 60).padStart(2, "0")}.${String(Math.floor(elapsed / 100) % 10)}`;
   const expectedMs = Math.max(4_000, block.text.split(/\s+/).length * (60_000 / promptWpm));
   const promptProgress = phase === "ready" ? 0 : Math.min(100, (promptElapsed / expectedMs) * 100);
+  const prompterScroll =
+    phase === "recording" || phase === "paused"
+      ? (promptProgress / 100) * prompterMaxScroll
+      : 0;
   return (
     <div className="recording-studio">
       <div className="recording-head">
@@ -543,7 +774,7 @@ function RecordingStudio({
           onClick={onCancel}
           disabled={phase !== "ready"}
         >
-          <ArrowLeft size={15} /> Back
+          <ArrowLeft size={15} /> Prepare
         </button>
         <span className={`live-state ${phase}`}>
           <i /> {phase === "ready" ? "Ready" : phase}
@@ -553,8 +784,17 @@ function RecordingStudio({
       </div>
       <div className="recording-body">
         <section className={`teleprompter ${mediaBreak ? "holding" : ""}`}>
-          <div className="teleprompter-head"><span className="eyebrow">Teleprompter · Block {block.position + 1}</span><label>{promptWpm} WPM<input type="range" min="90" max="220" step="5" value={promptWpm} onChange={(event) => setPromptWpm(Number(event.target.value))} /></label></div>
-          <p>{block.text}</p>
+          <div className="teleprompter-head"><span className="eyebrow">Teleprompter · Block {block.position + 1}</span><label>{promptWpm} WPM<input type="range" min="90" max="220" step="5" value={promptWpm} onChange={(event) => setPromptWpm(Number(event.target.value))} disabled={phase !== "ready"} /></label></div>
+          <div className="teleprompter-viewport" ref={prompterViewportRef}>
+            <span className="teleprompter-readline" aria-hidden="true" />
+            <p
+              ref={prompterTextRef}
+              className="teleprompter-copy"
+              style={{ transform: `translateY(-${prompterScroll}px)` }}
+            >
+              {block.text}
+            </p>
+          </div>
           <div className="prompter-progress">
             <span style={{ width: `${promptProgress}%` }} />
           </div>
@@ -566,6 +806,7 @@ function RecordingStudio({
             <AssetPreview
               project={project}
               assetId={activeCue.assetId}
+              variant="stage"
               playing={phase === "recording"}
               withAudio={activeCue.playbackMode === "play_solo"}
               inPointUs={activeCue.inPointUs}
@@ -1247,7 +1488,14 @@ function Tray({
   );
 }
 
-function TakeReview({ project, block, onUpdate, setBusy, setError }: AsyncProps & { block: ProjectSnapshot["blocks"][number] }) {
+function TakeReview({
+  project,
+  block,
+  onUpdate,
+  setBusy,
+  setError,
+  expanded = false,
+}: AsyncProps & { block: ProjectSnapshot["blocks"][number]; expanded?: boolean }) {
   async function selectTake(takeId: string) {
     setBusy(true);
     setError(null);
@@ -1266,14 +1514,14 @@ function TakeReview({ project, block, onUpdate, setBusy, setError }: AsyncProps 
     finally { setBusy(false); }
   }
   return (
-    <section className="take-review">
-      <div><strong>Saved takes</strong><span>Retakes are non-destructive. Choose the take used in export.</span></div>
+    <section className={`take-review ${expanded ? "expanded" : ""}`}>
+      <div><strong>Saved takes</strong></div>
       <div className="take-list">
         {block.takes.map((take, index) => (
           <label key={take.id} className={take.selected ? "selected" : ""}>
             <input type="radio" checked={take.selected} onChange={() => selectTake(take.id)} />
             <span>Take {block.takes.length - index}</span>
-            <audio controls preload="metadata" src={convertFileSrc(`${project.path}/${take.processedRelativePath ?? take.relativePath}`)} />
+            <audio controls preload="metadata" src={projectMediaUrl(project.path, take.processedRelativePath ?? take.relativePath)} />
             <small title={take.transcript ?? "Caption alignment pending"}>{(take.durationUs / 1_000_000).toFixed(1)}s{take.alignmentTotal > 0 ? ` · ${Math.round((take.alignmentMatched / take.alignmentTotal) * 100)}%` : " · pending"}</small>
             <button className="take-trash" aria-label="Move take to trash" onClick={(event) => { event.preventDefault(); void trashTake(take.id); }}><Trash2 size={12} /></button>
           </label>
@@ -1286,6 +1534,7 @@ function TakeReview({ project, block, onUpdate, setBusy, setError }: AsyncProps 
 function AssetPreview({
   project,
   assetId,
+  variant = "compact",
   playing = false,
   withAudio = false,
   inPointUs = 0,
@@ -1294,6 +1543,7 @@ function AssetPreview({
 }: {
   project: ProjectSnapshot;
   assetId: string;
+  variant?: "compact" | "stage";
   playing?: boolean;
   withAudio?: boolean;
   inPointUs?: number;
@@ -1302,31 +1552,52 @@ function AssetPreview({
 }) {
   const asset = project.assets.find((item) => item.id === assetId);
   if (!asset) return null;
-  const sourcePath =
-    playing && asset.proxyRelativePath
-      ? asset.proxyRelativePath
-      : asset.relativePath;
-  const source = convertFileSrc(`${project.path}/${sourcePath}`);
-  if (asset.mediaType === "video")
+  const projectSource = (relativePath: string) =>
+    projectMediaUrl(project.path, relativePath);
+  const poster =
+    asset.thumbnailRelativePath != null
+      ? projectSource(asset.thumbnailRelativePath)
+      : undefined;
+  if (asset.mediaType === "video") {
+    if (variant === "compact" && !playing && poster) {
+      return <img src={poster} alt="" />;
+    }
+    const sourcePath =
+      asset.proxyRelativePath ?? asset.relativePath;
+    const source = projectSource(sourcePath);
     return (
       <video
-        key={`${assetId}-${playing}-${inPointUs}-${outPointUs}`}
+        key={`${assetId}-${variant}-${playing}-${inPointUs}-${outPointUs}`}
         src={source}
+        poster={poster}
         muted={!withAudio}
+        playsInline
+        preload={playing ? "auto" : "metadata"}
         autoPlay={playing}
         loop={loopMode === "repeat"}
-        onLoadedMetadata={(event) => { event.currentTarget.currentTime = inPointUs / 1_000_000; }}
+        onLoadedMetadata={(event) => {
+          event.currentTarget.currentTime = inPointUs / 1_000_000;
+        }}
+        onLoadedData={(event) => {
+          if (!playing) {
+            event.currentTarget.pause();
+          }
+        }}
         onTimeUpdate={(event) => {
-          if (outPointUs != null && event.currentTarget.currentTime >= outPointUs / 1_000_000) event.currentTarget.pause();
+          if (outPointUs != null && event.currentTarget.currentTime >= outPointUs / 1_000_000) {
+            event.currentTarget.pause();
+          }
         }}
       />
     );
+  }
   if (asset.mediaType === "audio")
     return (
       <div className="audio-preview">
         <Mic2 size={23} />
       </div>
     );
+  const source = projectSource(asset.relativePath);
   return <img src={source} alt="" />;
 }
 interface AsyncProps {

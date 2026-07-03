@@ -1,6 +1,6 @@
 [package]
 name = "cheeza"
-version = "0.1.2"
+version = "0.1.3"
 description = "Script-driven narration and visual presentation studio"
 authors = ["Cheeza Contributors"]
 license = "AGPL-3.0-only"
@@ -25,6 +25,7 @@ tauri = { version = "2.11.3", features = ["protocol-asset"] }
 tauri-plugin-log = "2"
 tauri-plugin-dialog = "2.7.1"
 tauri-plugin-fs = "2.5.1"
+tauri-plugin-persisted-scope = { version = "2", features = ["protocol-asset"] }
 anyhow = "1.0.103"
 thiserror = "2.0.18"
 uuid = { version = "1.20.0", features = ["v4", "serde"] }

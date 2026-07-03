@@ -58,9 +58,9 @@ pub fn prepare(
                 "-frames:v",
                 "1",
                 "-vf",
-                "scale=480:-2:force_original_aspect_ratio=decrease",
+                "scale=720:-2:force_original_aspect_ratio=decrease",
                 "-q:v",
-                "3",
+                "2",
             ])
             .arg(&thumbnail))?;
     }
